@@ -60,6 +60,21 @@ jobs:
         run: go test ./cmd/internal/build_libbox
       - name: Test
         run: go test ./...
+      - name: Race test forward NAT and device lifecycle
+        run: >-
+          go test -race -count=1
+          ./common/kernelports ./common/forwardnat
+          ./transport/device ./transport/wireguard ./protocol/wireguard ./route
+      - name: Verify pinned sing-tun fragment behavior
+        run: |
+          python3 -B release/verify_forward_nat_test.py
+          python3 -B release/verify_forward_nat.py --race
+      - name: Compile non-Android forward NAT consumers
+        run: >-
+          go test -run '^$'
+          -tags 'with_quic,with_utls,with_wireguard,with_tailscale,with_openvpn,with_openconnect'
+          ./protocol/masque ./protocol/openvpn ./protocol/openconnect
+          ./protocol/tailscale ./protocol/wireguard ./transport/wireguard
       - name: Validate Android configuration corpus
         run: >-
           go test

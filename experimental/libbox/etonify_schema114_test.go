@@ -31,3 +31,30 @@ func TestEtonifyAndroidConfigCorpusSchema114(t *testing.T) {
 		})
 	}
 }
+
+func TestEtonifyAndroidConfigCorpusTUNDNSModes(t *testing.T) {
+	for _, mode := range []string{"", "disabled", "hijack", "native"} {
+		for _, autoRoute := range []bool{false, true} {
+			name := mode
+			if name == "" {
+				name = "default"
+			}
+			if autoRoute {
+				name += "/auto-route"
+			} else {
+				name += "/no-auto-route"
+			}
+			t.Run(name, func(t *testing.T) {
+				inbound := etonifyTUNInbound("")
+				delete(inbound, "stack")
+				inbound["auto_route"] = autoRoute
+				if mode != "" {
+					inbound["dns_mode"] = mode
+				}
+				encoded, err := json.Marshal(etonifyConfig([]any{inbound}, []any{etonifySelector(), etonifyDirect()}))
+				require.NoError(t, err)
+				require.NoError(t, CheckConfig(string(encoded)))
+			})
+		}
+	}
+}
