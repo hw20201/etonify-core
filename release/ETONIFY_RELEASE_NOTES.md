@@ -1,5 +1,11 @@
 ## Etonify Core 1.15 alpha test base
 
+### 1.15.0-alpha.10-etonify.2
+
+- Backport upstream scope cleanup filtering for expected cancellation and closed-resource errors.
+- Preserve genuine failures in wrapped mixed error trees and retain their diagnostic context.
+- Keep Etonify's late-resource cleanup and concurrent startup/shutdown protections.
+
 ### 1.15.0-alpha.10-etonify.1
 
 - Rebase the test baseline to the exact upstream `v1.15.0-alpha.10` release.

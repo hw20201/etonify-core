@@ -9,6 +9,7 @@ import (
 	"github.com/sagernet/sing-box/common/taskmonitor"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	F "github.com/sagernet/sing/common/format"
 )
@@ -145,11 +146,37 @@ func (s *Scope) Close() error {
 	s.cleanups = nil
 	s.children = nil
 	s.access.Unlock()
-	var err error
+	var cleanupErrors []error
 	for _, cleanup := range slices.Backward(cleanups) {
-		err = E.Errors(err, cleanup())
+		cleanupErrors = append(cleanupErrors, E.Expand(cleanup())...)
 	}
-	return err
+	return E.Errors(common.Filter(cleanupErrors, func(it error) bool {
+		return !expectedScopeCleanupError(it)
+	})...)
+}
+
+// IsCanceled/IsClosed match any branch in an error tree. Only discard the
+// whole error when every leaf is expected; a mixed wrapped failure must keep
+// its original context and real causes rather than disappearing at shutdown.
+func expectedScopeCleanupError(err error) bool {
+	if multiple, ok := err.(interface{ Unwrap() []error }); ok {
+		children := multiple.Unwrap()
+		if len(children) == 0 {
+			return E.IsClosed(err) || E.IsCanceled(err)
+		}
+		for _, child := range children {
+			if child != nil && !expectedScopeCleanupError(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if single, ok := err.(interface{ Unwrap() error }); ok {
+		if child := single.Unwrap(); child != nil {
+			return expectedScopeCleanupError(child)
+		}
+	}
+	return E.IsClosed(err) || E.IsCanceled(err)
 }
 
 func LogElapsed(logger log.ContextLogger, description ...any) func() {
