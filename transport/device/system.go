@@ -60,6 +60,12 @@ func newSystemDevice(options Options) (*systemDevice, error) {
 func (d *systemDevice) Start() error {
 	d.stateAccess.Lock()
 	defer d.stateAccess.Unlock()
+	if d.closed {
+		return net.ErrClosed
+	}
+	if d.device != nil {
+		return nil
+	}
 	err := d.startLocked()
 	if err != nil {
 		return err

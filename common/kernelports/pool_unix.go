@@ -4,6 +4,7 @@ package kernelports
 
 import (
 	"errors"
+	"net"
 	"net/netip"
 	"sync/atomic"
 	"syscall"
@@ -17,8 +18,9 @@ import (
 const lowestSelector = 1024
 
 type Pool struct {
-	tcp atomic.Pointer[[]tun.SelectorRange]
-	udp atomic.Pointer[[]tun.SelectorRange]
+	tcp    atomic.Pointer[[]tun.SelectorRange]
+	udp    atomic.Pointer[[]tun.SelectorRange]
+	closed atomic.Bool
 }
 
 func New() (*Pool, error) {
@@ -43,10 +45,16 @@ func New() (*Pool, error) {
 }
 
 func (p *Pool) Acquire(protocol uint8) (tun.SelectorRange, error) {
+	if p.closed.Load() {
+		return tun.SelectorRange{}, net.ErrClosed
+	}
 	return tun.SelectorRange{}, ErrExhausted
 }
 
 func (p *Pool) ReserveSelector(protocol uint8, address netip.AddrPort) bool {
+	if p.closed.Load() {
+		return false
+	}
 	var socketType int
 	switch protocol {
 	case uint8(header.TCPProtocolNumber):
@@ -83,5 +91,8 @@ func (p *Pool) ReserveSelector(protocol uint8, address netip.AddrPort) bool {
 }
 
 func (p *Pool) Close() error {
+	p.closed.Store(true)
+	p.tcp.Store(nil)
+	p.udp.Store(nil)
 	return nil
 }

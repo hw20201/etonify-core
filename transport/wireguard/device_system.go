@@ -25,15 +25,17 @@ import (
 var _ Device = (*systemDevice)(nil)
 
 type systemDevice struct {
-	options      DeviceOptions
-	dialer       N.Dialer
-	device       tun.Tun
-	ports        atomic.Pointer[kernelports.Pool]
-	batchDevice  tun.LinuxTUN
-	events       chan wgTun.Event
-	closeOnce    sync.Once
-	inet4Address netip.Addr
-	inet6Address netip.Addr
+	options         DeviceOptions
+	dialer          N.Dialer
+	device          tun.Tun
+	ports           atomic.Pointer[kernelports.Pool]
+	batchDevice     tun.LinuxTUN
+	events          chan wgTun.Event
+	closeOnce       sync.Once
+	lifecycleAccess sync.Mutex
+	closed          bool
+	inet4Address    netip.Addr
+	inet6Address    netip.Addr
 }
 
 func newSystemDevice(options DeviceOptions) (*systemDevice, error) {
@@ -78,6 +80,14 @@ func (w *systemDevice) UpstreamPort() any {
 }
 
 func (w *systemDevice) Start() error {
+	w.lifecycleAccess.Lock()
+	defer w.lifecycleAccess.Unlock()
+	if w.closed {
+		return net.ErrClosed
+	}
+	if w.device != nil {
+		return nil
+	}
 	networkManager := service.FromContext[adapter.NetworkManager](w.options.Context)
 	tunOptions := tun.Options{
 		Name: w.options.Name,
@@ -184,11 +194,14 @@ func (w *systemDevice) Events() <-chan wgTun.Event {
 func (w *systemDevice) Close() error {
 	var err error
 	w.closeOnce.Do(func() {
+		w.lifecycleAccess.Lock()
+		defer w.lifecycleAccess.Unlock()
+		w.closed = true
 		close(w.events)
 		if w.device != nil {
 			err = w.device.Close()
 		}
-		ports := w.ports.Load()
+		ports := w.ports.Swap(nil)
 		if ports != nil {
 			err = E.Errors(err, ports.Close())
 		}

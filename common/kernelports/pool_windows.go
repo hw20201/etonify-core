@@ -2,6 +2,7 @@ package kernelports
 
 import (
 	"encoding/binary"
+	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -25,8 +26,9 @@ const (
 const sioAcquirePortReservation uint32 = 0x80000000 | 0x18000000 | 100
 
 type Pool struct {
-	tcp atomic.Pointer[[]tun.SelectorRange]
-	udp atomic.Pointer[[]tun.SelectorRange]
+	tcp    atomic.Pointer[[]tun.SelectorRange]
+	udp    atomic.Pointer[[]tun.SelectorRange]
+	closed atomic.Bool
 
 	access sync.Mutex
 	blocks map[uint8][]windows.Handle
@@ -59,6 +61,9 @@ func (p *Pool) Acquire(protocol uint8) (tun.SelectorRange, error) {
 	}
 	p.access.Lock()
 	defer p.access.Unlock()
+	if p.closed.Load() {
+		return tun.SelectorRange{}, net.ErrClosed
+	}
 	if len(p.blocks[protocol]) >= maxBlocks {
 		return tun.SelectorRange{}, ErrExhausted
 	}
@@ -105,12 +110,15 @@ func (p *Pool) Acquire(protocol uint8) (tun.SelectorRange, error) {
 }
 
 func (p *Pool) ReserveSelector(protocol uint8, address netip.AddrPort) bool {
-	return true
+	return !p.closed.Load()
 }
 
 func (p *Pool) Close() error {
 	p.access.Lock()
 	defer p.access.Unlock()
+	p.closed.Store(true)
+	p.tcp.Store(nil)
+	p.udp.Store(nil)
 	for _, sockets := range p.blocks {
 		for _, socket := range sockets {
 			windows.Closesocket(socket)
