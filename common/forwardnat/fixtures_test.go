@@ -58,6 +58,7 @@ type fixturePort struct {
 	ranges             []tun.SelectorRange
 	occupied, reserved map[netip.AddrPort]bool
 	released           []netip.AddrPort
+	expand             bool
 }
 
 func (*fixturePort) PortAddresses() (netip.Addr, netip.Addr) {
@@ -73,7 +74,14 @@ func (p *fixturePort) DetachReturn(r tun.Return) error {
 }
 func (p *fixturePort) WritePackets(packets [][]byte) error          { return p.WriteReturnPackets(packets) }
 func (p *fixturePort) PortSelectorRanges(uint8) []tun.SelectorRange { return p.ranges }
-func (*fixturePort) ExpandSelectorRanges(uint8) bool                { return false }
+func (p *fixturePort) ExpandSelectorRanges(uint8) bool {
+	if !p.expand {
+		return false
+	}
+	p.expand = false
+	p.ranges = append(p.ranges, tun.SelectorRange{Start: 51000, Count: 1})
+	return true
+}
 func (p *fixturePort) ReserveSelector(protocol uint8, address netip.AddrPort) bool {
 	if protocol != 17 || p.occupied[address] || p.reserved[address] {
 		return false

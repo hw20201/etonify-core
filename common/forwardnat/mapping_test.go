@@ -125,6 +125,55 @@ func TestForwardNATNestedUpstreamCapability(t *testing.T) {
 
 func TestForwardNATRejectsLateReturnsAfterReset(t *testing.T) { testLateReturn(t, false) }
 func TestForwardNATRejectsLateReturnsAfterClose(t *testing.T) { testLateReturn(t, true) }
+
+func TestForwardNATRejectsLateReturnsIntoNewClientAfterReset(t *testing.T) {
+	f := newForwardFixture(t, tun.UDPNatOptions{})
+	f.port.ranges = []tun.SelectorRange{{Start: 50000, Count: 2}}
+	oldClient := netip.MustParseAddrPort("10.0.0.2:50000")
+	oldNAT, _ := packetEndpoints(f.send(oldClient, server, "old request"))
+	returnPath := f.port.returnPath
+	f.dispatcher.ResetNetwork()
+	f.stage.Flush()
+	newClient := netip.MustParseAddrPort("10.0.0.3:50000")
+	newServer := netip.MustParseAddrPort("198.51.100.2:443")
+	newNAT, _ := packetEndpoints(f.send(newClient, newServer, "new request"))
+	// A previous-network reply must not cross
+	// into another client's new session through endpoint-independent filtering.
+	require.Empty(t, returnPath.ReturnPackets([][]byte{udpPacket(t, newServer, newNAT, []byte("current"))}))
+	require.Len(t, f.writeback.packets, 1)
+	returnPath.ReturnPackets([][]byte{udpPacket(t, server, oldNAT, []byte("late old reply"))})
+	require.Len(t, f.writeback.packets, 1, "old-network reply was delivered into a new client's flow")
+}
+
+func TestForwardNATRepeatedResetExhaustionAndExpansion(t *testing.T) {
+	for _, expand := range []bool{false, true} {
+		f := newForwardFixture(t, tun.UDPNatOptions{})
+		f.port.ranges = []tun.SelectorRange{{Start: 50000, Count: 1}}
+		old, _ := packetEndpoints(f.send(netip.MustParseAddrPort("10.0.0.2:50000"), server, "old"))
+		f.dispatcher.ResetNetwork()
+		f.stage.Flush()
+		f.port.expand = expand
+		before := len(f.port.packets)
+		require.True(t, f.stage.Dispatch(udpPacket(t, netip.MustParseAddrPort("10.0.0.3:50000"), server, []byte("new"))))
+		f.stage.Flush()
+		if expand {
+			require.Len(t, f.port.packets, before+1)
+			current, _ := packetEndpoints(f.port.packets[before])
+			require.NotEqual(t, old, current)
+			require.Empty(t, f.port.returnPath.ReturnPackets([][]byte{udpPacket(t, server, old, []byte("late"))}))
+			require.Empty(t, f.writeback.packets)
+			f.dispatcher.ResetNetwork()
+			f.stage.Flush()
+			require.True(t, f.stage.Dispatch(udpPacket(t, netip.MustParseAddrPort("10.0.0.4:50000"), server, []byte("third"))))
+			f.stage.Flush()
+			require.Len(t, f.port.packets, before+1, "both selectors quarantined")
+		} else {
+			require.Len(t, f.port.packets, before, "exhaustion must refuse, not reuse a stale selector")
+		}
+		f.dispatcher.Close()
+		require.Empty(t, f.port.reserved)
+	}
+}
 func testLateReturn(t *testing.T, closeDispatcher bool) {
 	f := newForwardFixture(t, tun.UDPNatOptions{})
 	nat, _ := packetEndpoints(f.send(client, server, "request"))
