@@ -1,5 +1,18 @@
 ## Etonify Core 1.15 alpha test base
 
+### 1.15.0-alpha.10-etonify.3
+
+- Integrate the forward NAT/fragment backport using the pinned `yamixdev/sing-tun` fork, not a cached upstream module.
+- Fork source: `3692459a3211ad692b83580cd4c95e1ff4e20080`; upstream base: `5c2edb183cc92eb190d41c04dedfa5519ca3e78c`.
+- Make dispatcher teardown single-owner, including concurrent Close and registration during shutdown.
+- Track unique fragment coverage in a bounded bitmap; preserve missing fragments after duplicates/overlaps and keep fixed expiry.
+- Quarantine released UDP selectors for four minutes across resets and reacquisition of the same live Port. Free physical reservations on expiry even without traffic; serialize final release before new ownership.
+- Guard active/retired cleanup timers by generation. Registry capacity is reserved for at most 1024 active plus retired allocators; pressure refuses unsafe reuse. This finite window cannot identify arbitrarily late UDP replies after reuse.
+- Add real packet, shared-owner, expiry, exhaustion and race regressions; preserve existing mapping/filtering modes, libbox API, Android API24 and ARM build tags.
+- Include pinned fork source/license in the source archive and record/check fork repository, SHA, upstream base and Go module version in both AAR provenance paths.
+- Local targeted/race/configuration/source-provenance checks pass. Full Windows integration suites still require driver privileges/IPv6 and contain upstream vet failures. Remote Linux CI/AAR and phone acceptance are pending delivery; the bundled client AAR is not changed by this source revision.
+- Known minor: source archive bytes depend on Git checkout line-ending configuration. Repeated archives in the same configuration are deterministic; cross-platform normalization is deferred.
+
 ### 1.15.0-alpha.10-etonify.2
 
 - Backport upstream scope cleanup filtering for expected cancellation and closed-resource errors.
