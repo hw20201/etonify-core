@@ -62,6 +62,7 @@ jobs:
         run: |
           python3 -B release/sing_tun_pin_test.py
           python3 -B release/fork_ci_test.py
+          python3 -B release/source_archive_test.py
       - name: Race test pinned fork regressions
         working-directory: third_party/sing-tun
         run: go test -race -count=1 -run '^TestEtonify' .
@@ -174,7 +175,8 @@ jobs:
           mkdir -p dist
           cp libbox.aar libbox-sources.jar dist/
           sha256sum libbox.aar > dist/libbox.sha256
-          git archive --format=tar HEAD | gzip -n > dist/etonify-core-source.tar.gz
+          python3 -B release/source_archive.py dist/etonify-core-source.tar.gz
+          pin_json="$(python3 -B release/sing_tun_pin.py --strict)"
           commit="$(git rev-parse HEAD)"
           version="$(git describe --tags --always --dirty)"
           go_actual="$(go version)"
@@ -187,6 +189,10 @@ jobs:
             "source_version": "${version}",
             "etonify_version": "${etonify_version}",
             "upstream_commit": "${UPSTREAM_COMMIT}",
+            "sing_tun_repository": "$(jq -r .repository <<< "$pin_json")",
+            "sing_tun_commit": "$(jq -r .commit <<< "$pin_json")",
+            "sing_tun_upstream_commit": "$(jq -r .upstream_commit <<< "$pin_json")",
+            "sing_tun_module_version": "$(jq -r .module_version <<< "$pin_json")",
             "go": "${go_actual}",
             "gomobile": "${GOMOBILE_VERSION}",
             "java": "${java_actual}",
