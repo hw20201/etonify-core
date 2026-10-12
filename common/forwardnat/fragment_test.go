@@ -128,3 +128,71 @@ func TestForwardNATFragmentAfterFlowClose(t *testing.T) {
 	require.Empty(t, left, "closed-flow tail must be dropped, not forwarded to another handler")
 	require.Len(t, f.writeback.packets, 1)
 }
+
+func TestForwardNATDuplicateFragmentIPv4(t *testing.T) { testDuplicateFragment(t, false) }
+func TestForwardNATDuplicateFragmentIPv6(t *testing.T) { testDuplicateFragment(t, true) }
+
+func testDuplicateFragment(t *testing.T, ipv6 bool) {
+	f := newForwardFixture(t, tun.UDPNatOptions{})
+	c, s := client, server
+	if ipv6 {
+		c = netip.MustParseAddrPort("[fd00::2]:12345")
+		s = netip.MustParseAddrPort("[2001:db8::2]:443")
+	}
+	nat, _ := packetEndpoints(f.send(c, s, "request"))
+	payload := []byte("0123456789abcdef0123456789abcdef0123456789abcdef01234567")
+	packet := udpPacket(t, s, nat, payload)
+	h := ipHeaderLength(packet)
+	transport := packet[h:]
+	require.Len(t, transport, 64)
+	makeFragment := func(offset int) []byte {
+		part := transport[offset : offset+16]
+		more := offset != 48
+		if h == 20 {
+			p := append(append([]byte(nil), packet[:h]...), part...)
+			binary.BigEndian.PutUint16(p[2:], uint16(len(p)))
+			binary.BigEndian.PutUint16(p[4:], 77)
+			flags := uint16(offset / 8)
+			if more {
+				flags |= 0x2000
+			}
+			binary.BigEndian.PutUint16(p[6:], flags)
+			p[10], p[11] = 0, 0
+			binary.BigEndian.PutUint16(p[10:], internetChecksum(p[:h]))
+			return p
+		}
+		p := make([]byte, h+8+16)
+		copy(p, packet[:h])
+		p[6] = 44
+		binary.BigEndian.PutUint16(p[4:], 24)
+		p[h] = 17
+		flags := uint16(offset)
+		if more {
+			flags |= 1
+		}
+		binary.BigEndian.PutUint16(p[h+2:], flags)
+		binary.BigEndian.PutUint32(p[h+4:], 77)
+		copy(p[h+8:], part)
+		return p
+	}
+	restored := make([]byte, 64)
+	for _, offset := range []int{0, 16, 16, 48, 32} {
+		before := len(f.writeback.packets)
+		require.Empty(t, f.port.returnPath.ReturnPackets([][]byte{makeFragment(offset)}), "offset=%d", offset)
+		require.Len(t, f.writeback.packets, before+1)
+		p := f.writeback.packets[before]
+		src, dst := packetAddresses(p)
+		require.Equal(t, s.Addr(), src)
+		require.Equal(t, c.Addr(), dst)
+		ph := h
+		if ipv6 {
+			ph += 8
+		} else {
+			require.Zero(t, internetChecksum(p[:h]))
+		}
+		copy(restored[offset:], p[ph:])
+	}
+	require.Equal(t, payload, restored[8:])
+	require.Equal(t, c.Port(), binary.BigEndian.Uint16(restored[2:]))
+	require.Zero(t, internetChecksum(append(udpPseudoHeader(s.Addr(), c.Addr(), len(restored)), restored...)))
+}

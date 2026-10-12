@@ -15,10 +15,10 @@ func TestEtonifyForwardFragmentExpiry(t *testing.T) {
 	key := etonifyFragmentKey(1)
 	flow := &forwardFlow{}
 	table.insert(key, flow, &rewriteRule{}, 16, 0)
-	if table.lookup(key, fragmentInfo{more: true, payload: []byte{1}}, int64(30*time.Second)) == nil {
+	if table.lookup(key, fragmentInfo{offset: 16, more: true, payload: make([]byte, 8)}, int64(30*time.Second)) == nil {
 		t.Fatal("association expired before its TTL")
 	}
-	if table.lookup(key, fragmentInfo{more: true}, int64(30*time.Second)+1) != nil {
+	if table.lookup(key, fragmentInfo{offset: 16, more: true, payload: make([]byte, 8)}, int64(30*time.Second)+1) != nil {
 		t.Fatal("expired association was reused")
 	}
 	if len(table.entries) != 0 {
@@ -82,5 +82,56 @@ func TestEtonifyForwardFragmentOrderAndDuplicates(t *testing.T) {
 	}
 	if table.lookup(key, fragmentInfo{more: true}, int64(31*time.Second)) != nil {
 		t.Fatal("duplicates prolonged TTL indefinitely")
+	}
+}
+
+func TestEtonifyForwardFragmentDuplicateDoesNotDiscardUniqueTail(t *testing.T) {
+	table := fragmentTable{entries: make(map[fragmentKey]*fragmentEntry)}
+	key := etonifyFragmentKey(42)
+	flow := &forwardFlow{}
+	table.insert(key, flow, &rewriteRule{}, 16, 0)
+	// Four distinct 16-byte regions. A duplicate at offset 16 does not cover
+	// the missing region at offset 32, even when the final fragment arrived.
+	for _, info := range []fragmentInfo{
+		{offset: 16, more: true, payload: make([]byte, 16)},
+		{offset: 16, more: true, payload: make([]byte, 16)},
+		{offset: 48, payload: make([]byte, 16)},
+		{offset: 32, more: true, payload: make([]byte, 16)},
+	} {
+		entry := table.lookup(key, info, 1)
+		if entry == nil || entry.flow != flow {
+			t.Fatalf("unique fragment offset=%d lost its association after a duplicate", info.offset)
+		}
+	}
+	if table.lookup(key, fragmentInfo{offset: 32, more: true, payload: make([]byte, 16)}, 2) != nil {
+		t.Fatal("completed association retained")
+	}
+}
+
+type etonifySharedPort struct{}
+
+func (*etonifySharedPort) PortAddresses() (netip.Addr, netip.Addr) {
+	return netip.MustParseAddr("192.0.2.1"), netip.Addr{}
+}
+func (*etonifySharedPort) PortMTU() uint32             { return 1500 }
+func (*etonifySharedPort) AttachReturn(Return) error   { return nil }
+func (*etonifySharedPort) DetachReturn(Return) error   { return nil }
+func (*etonifySharedPort) WritePackets([][]byte) error { return nil }
+
+func TestEtonifyForwardFragmentDispatcherDoubleCloseKeepsSharedNAT(t *testing.T) {
+	port := &etonifySharedPort{}
+	first := NewForwardDispatcher(nil, nil, nil, UDPNatOptions{}, 0)
+	second := NewForwardDispatcher(nil, nil, nil, UDPNatOptions{}, 0)
+	shared := first.natFor(port)
+	if second.natFor(port) != shared {
+		t.Fatal("initial allocator is not shared")
+	}
+	defer second.Close()
+	first.Close()
+	first.Close()
+	third := NewForwardDispatcher(nil, nil, nil, UDPNatOptions{}, 0)
+	defer third.Close()
+	if third.natFor(port) != shared {
+		t.Fatal("repeated Close removed a NAT allocator still owned by another dispatcher")
 	}
 }
