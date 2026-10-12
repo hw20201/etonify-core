@@ -6,6 +6,8 @@ on:
       - etonify-dev
     paths:
       - '.github/workflows/etonify-libbox.yml'
+      - '.gitmodules'
+      - 'third_party/sing-tun'
       - 'adapter/**'
       - 'cmd/**'
       - 'common/**'
@@ -47,6 +49,8 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
+      - name: Initialize pinned sing-tun only
+        run: git submodule update --init -- third_party/sing-tun
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
@@ -54,12 +58,22 @@ jobs:
           cache: true
       - name: Verify baseline
         run: bash release/verify_etonify_baseline.sh
+      - name: Verify pin gate behavior
+        run: |
+          python3 -B release/sing_tun_pin_test.py
+          python3 -B release/fork_ci_test.py
+      - name: Race test pinned fork regressions
+        working-directory: third_party/sing-tun
+        run: go test -race -count=1 -run '^TestEtonify' .
+      - name: Full pinned fork tests (upstream privilege convention)
+        working-directory: third_party/sing-tun
+        run: go test -count=1 -exec sudo ./...
       - name: Check scoped shutdown regression
         run: go test -race -count=1 -run '^TestScope' ./adapter
       - name: Verify libbox version source
         run: go test ./cmd/internal/build_libbox
       - name: Test
-        run: go test ./...
+        run: go test -count=1 -exec sudo ./...
       - name: Race test forward NAT and device lifecycle
         run: >-
           go test -race -count=1
@@ -68,7 +82,7 @@ jobs:
       - name: Verify pinned sing-tun fragment behavior
         run: |
           python3 -B release/verify_forward_nat_test.py
-          python3 -B release/verify_forward_nat.py --race
+          python3 -B release/verify_forward_nat.py --race --strict
       - name: Compile non-Android forward NAT consumers
         run: >-
           go test -run '^$'
@@ -108,6 +122,8 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
+      - name: Initialize pinned sing-tun only
+        run: git submodule update --init -- third_party/sing-tun
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:

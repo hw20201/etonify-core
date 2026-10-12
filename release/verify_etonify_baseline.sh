@@ -5,6 +5,10 @@ set -euo pipefail
 repository_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repository_root}"
 
+# Fail before compilation if the selected dependency is missing, dirty, stale,
+# or redirected to a module cache instead of our committed fork.
+"${PYTHON_BIN:-python3}" -B release/sing_tun_pin.py --strict
+
 # shellcheck disable=SC1091
 eval "$(tr -d '\r' < release/ETONIFY_BASELINE)"
 
