@@ -2,6 +2,8 @@ module github.com/sagernet/sing-box
 
 go 1.26.0
 
+replace github.com/sagernet/sing-tun v0.9.7-0.20261009022811-5c2edb183cc9 => ./third_party/sing-tun
+
 require (
 	filippo.io/age v1.3.1
 	github.com/anthropics/anthropic-sdk-go v1.26.0

@@ -7,3 +7,6 @@
 [submodule "clients/desktop"]
 	path = clients/desktop
 	url = https://github.com/SagerNet/sing-box-for-desktop.git
+[submodule "third_party/sing-tun"]
+	path = third_party/sing-tun
+	url = https://github.com/yamixdev/sing-tun.git
