@@ -28,7 +28,7 @@ func TestProtocolModesDefaults(t *testing.T) {
 		modes.ProcessPaths == nil || len(modes.ProcessPaths) != 0 {
 		t.Fatalf("defaults differ from Dart/schema: %+v", modes)
 	}
-	for _, bad := range []string{`{"tunEnabled":null}`, `{"processPaths":null}`, `{"processRoutingMode":"invalid"}`} {
+	for _, bad := range []string{`{"tunEnabled":null}`, `{"processPaths":null}`, `{"processPaths":[null]}`, `{"processPaths":["C:\\Apps\\a.exe",null]}`, `{"processRoutingMode":"invalid"}`} {
 		if err := json.Unmarshal([]byte(bad), &modes); err == nil {
 			t.Fatalf("accepted invalid modes %s", bad)
 		}

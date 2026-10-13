@@ -133,6 +133,17 @@ func (m *Modes) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("null modes %s", key)
 		}
 	}
+	if raw, exists := fields["processPaths"]; exists {
+		var paths []json.RawMessage
+		if err := json.Unmarshal(raw, &paths); err != nil {
+			return err
+		}
+		for index, path := range paths {
+			if bytes.Equal(bytes.TrimSpace(path), []byte("null")) {
+				return fmt.Errorf("null process path %d", index)
+			}
+		}
+	}
 	type plain Modes
 	value := plain(DefaultModes())
 	if err := json.Unmarshal(data, &value); err != nil {
