@@ -278,9 +278,10 @@ func TestHostCloseRejectsLatePublisher(t *testing.T) {
 	}
 }
 
-func TestHostUnavailableNativeAgentNeverStartsHost(t *testing.T) {
+func TestHostUnauthenticatedNativeAgentNeverStartsHost(t *testing.T) {
 	err := RunAgent(context.Background(), AgentOptions{InstallationID: "test", DataRoot: t.TempDir(), Nonce: "nonce", ParentPID: 123})
-	if err == nil || !strings.Contains(err.Error(), "B2") {
+	var failure *hostError
+	if !errors.As(err, &failure) || failure.code != "unauthorized" && failure.code != "unavailable" {
 		t.Fatalf("unauthenticated agent accepted: %v", err)
 	}
 }

@@ -185,6 +185,11 @@ func (h *Host) Call(ctx context.Context, request Request) (json.RawMessage, erro
 	if descriptor == nil {
 		return raw, nil
 	}
+	release, err := h.leaseChunkReply(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	for _, chunk := range chunks {
 		if err = h.emit(ctx, chunk); err != nil {
 			return nil, err

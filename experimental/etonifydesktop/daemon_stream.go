@@ -161,6 +161,17 @@ func chunkEvent(event Event) ([]Event, json.RawMessage, error) {
 }
 
 func (h *Host) publishBounded(ctx context.Context, event Event) (json.RawMessage, error) {
+	h.initChunkFlow()
+	// One subscription's chunks are contiguous in Events even when RPC chunks
+	// interleave. Stop can cancel both the current publication and its waiters.
+	select {
+	case h.subscriptionChunkSlot <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-h.ctx.Done():
+		return nil, h.ctx.Err()
+	}
+	defer func() { <-h.subscriptionChunkSlot }()
 	chunks, descriptor, err := chunkEvent(event)
 	if err != nil {
 		return nil, err

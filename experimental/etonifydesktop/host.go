@@ -51,28 +51,29 @@ type AgentOptions struct {
 	Owner          PeerIdentity
 }
 
-// RunAgent is the authenticated-runner seam. B2 must replace this error with
-// peer/token verification, a held GUI process handle, and lease-bound transport
-// lifetime before creating a Host. A PID/nonce alone is not proof of ownership.
-func RunAgent(context.Context, AgentOptions) error {
-	return runtimeFailure("unavailable", "Authenticated agent runner requires B2")
+// No backend is created until the platform runner verifies its owner and pipe.
+func RunAgent(ctx context.Context, options AgentOptions) error {
+	return runPlatformAgent(ctx, options)
 }
 
 type Host struct {
-	ctx          context.Context
-	cancel       context.CancelFunc
-	options      HostOptions
-	operation    sync.Mutex
-	mu           sync.RWMutex
-	daemon       *daemon.StartedService
-	state        Snapshot
-	issued       int64
-	events       chan Event
-	streamCancel context.CancelFunc
-	streamWG     sync.WaitGroup
-	closeOnce    sync.Once
-	emitMu       sync.RWMutex
-	closed       bool
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	options               HostOptions
+	operation             sync.Mutex
+	mu                    sync.RWMutex
+	daemon                *daemon.StartedService
+	state                 Snapshot
+	issued                int64
+	events                chan Event
+	streamCancel          context.CancelFunc
+	streamWG              sync.WaitGroup
+	closeOnce             sync.Once
+	emitMu                sync.RWMutex
+	closed                bool
+	chunkInit             sync.Once
+	rpcChunkSlots         chan struct{}
+	subscriptionChunkSlot chan struct{}
 }
 
 var _ HostBackend = (*Host)(nil)
@@ -311,6 +312,11 @@ func (h *Host) emit(ctx context.Context, e Event) error {
 		h.emitMu.RUnlock()
 		return h.ctx.Err()
 	case h.events <- e:
+	}
+	if e.Method == "streamChunk" && e.ID != "" {
+		if fence, ok := ctx.Value(responseFenceKey{}).(*responseFence); ok {
+			fence.publishedChunk()
+		}
 	}
 	h.emitMu.RUnlock()
 	if h.options.Emit != nil {

@@ -1,5 +1,4 @@
-// etonify-desktop is the bounded desktop agent entry point. Native peer/parent
-// authentication is wired by B2; until then RunAgent fails closed, not connected.
+// etonify-desktop is the bounded, owner-authenticated desktop agent entry point.
 package main
 
 import (
