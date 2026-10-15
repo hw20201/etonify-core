@@ -160,7 +160,9 @@ func (h *Host) Start(ctx context.Context, request StartRequest) (Snapshot, error
 	h.state = s
 	d := h.daemon
 	h.mu.Unlock()
-	h.publishSnapshot(s)
+	if err = h.publishSnapshot(ctx, s); err != nil {
+		return h.failStart(ctx, d, s, err)
+	}
 	cancellationDone := make(chan struct{})
 	stopCancellation := context.AfterFunc(ctx, func() { _ = d.CloseService(); close(cancellationDone) })
 	err = d.StartOrReloadService(ctx, request.Config, nil)
@@ -173,14 +175,6 @@ func (h *Host) Start(ctx context.Context, request StartRequest) (Snapshot, error
 			err = errors.New("daemon not ready")
 		}
 	}
-	// Detach the request deadline before committing connected. If cancellation
-	// already won, join its teardown so a closed daemon cannot be reported ready.
-	if !stopCancellation() {
-		<-cancellationDone
-	}
-	if err == nil {
-		err = ctx.Err()
-	}
 	if err == nil {
 		var c net.Conn
 		c, err = (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "tcp", listener)
@@ -188,16 +182,37 @@ func (h *Host) Start(ctx context.Context, request StartRequest) (Snapshot, error
 			_ = c.Close()
 		}
 	}
+	// Join any callback before releasing the lifecycle operation, so cancelled
+	// cleanup cannot later tear down an instance belonging to a subsequent Start.
+	if !stopCancellation() {
+		<-cancellationDone
+	}
+	if err == nil {
+		err = ctx.Err()
+	}
 	if err != nil {
-		_ = d.CloseService()
-		s.Phase, s.Error = "failed", &RuntimeError{Code: "start_failed", Message: "Daemon or local listener failed to start"}
-		h.setState(s)
-		return s, runtimeFailure(s.Error.Code, s.Error.Message)
+		return h.failStart(ctx, d, s, err)
 	}
 	s.Phase, s.Modes = "connected", request.Modes
-	h.setState(s)
+	if err = h.setState(ctx, s); err != nil {
+		return h.failStart(ctx, d, s, err)
+	}
 	h.beginStreams(d, s)
 	return s, nil
+}
+
+// An undelivered Start transition is not a successful runtime operation. Keep
+// actual state available to snapshot(), close the instance, and preserve the
+// cause for Dispatch without publishing raw daemon/config diagnostics.
+func (h *Host) failStart(ctx context.Context, d *daemon.StartedService, s Snapshot, cause error) (Snapshot, error) {
+	closeErr := d.CloseService()
+	s.Phase, s.SelectedTag, s.Modes = "failed", "", DefaultModes()
+	s.Error = &RuntimeError{Code: "start_failed", Message: "Daemon or local listener failed to start"}
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+		s.Error = &RuntimeError{Code: "cancelled", Message: "Runtime operation cancelled"}
+	}
+	deliveryErr := h.setState(ctx, s)
+	return s, &hostError{code: s.Error.Code, message: s.Error.Message, cause: errors.Join(cause, closeErr, deliveryErr)}
 }
 
 func localProxyAddress(config string) (string, error) {
@@ -252,8 +267,7 @@ func (h *Host) Stop(ctx context.Context, reason string) error {
 	s := h.Snapshot()
 	s.Phase, s.Error, s.SelectedTag = "stopped", nil, ""
 	s.Modes = DefaultModes()
-	h.setState(s)
-	return nil
+	return h.setState(ctx, s)
 }
 
 func (h *Host) Snapshot() Snapshot {
@@ -267,12 +281,23 @@ func (h *Host) Snapshot() Snapshot {
 	}
 	return s
 }
-func (h *Host) setState(s Snapshot) { h.mu.Lock(); h.state = s; h.mu.Unlock(); h.publishSnapshot(s) }
-func (h *Host) publishSnapshot(s Snapshot) {
-	payload, _ := json.Marshal(s)
-	h.emit(h.ctx, Event{Version: ProtocolVersion, Kind: "event", SessionID: s.SessionID, ConfigGeneration: s.ConfigGeneration, NetworkGeneration: s.NetworkGeneration, Method: "snapshot", Payload: payload})
+func (h *Host) setState(ctx context.Context, s Snapshot) error {
+	h.mu.Lock()
+	h.state = s
+	h.mu.Unlock()
+	return h.publishSnapshot(ctx, s)
+}
+func (h *Host) publishSnapshot(ctx context.Context, s Snapshot) error {
+	payload, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	return h.emit(ctx, Event{Version: ProtocolVersion, Kind: "event", SessionID: s.SessionID, ConfigGeneration: s.ConfigGeneration, NetworkGeneration: s.NetworkGeneration, Method: "snapshot", Payload: payload})
 }
 func (h *Host) emit(ctx context.Context, e Event) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	h.emitMu.RLock()
 	if h.closed || h.ctx.Err() != nil {
 		h.emitMu.RUnlock()
@@ -291,7 +316,7 @@ func (h *Host) emit(ctx context.Context, e Event) error {
 	if h.options.Emit != nil {
 		h.options.Emit(e)
 	}
-	return nil
+	return ctx.Err()
 }
 func (h *Host) Events() <-chan Event { return h.events }
 func (h *Host) Close() {

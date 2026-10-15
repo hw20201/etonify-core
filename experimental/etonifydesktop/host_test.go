@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -24,6 +25,166 @@ import (
 	"github.com/sagernet/sing-box/protocol/direct"
 	"github.com/sagernet/sing/service"
 )
+
+func fillEventQueue(h *Host) {
+	for {
+		select {
+		case h.events <- Event{Method: "test-saturation"}:
+		default:
+			return
+		}
+	}
+}
+
+func awaitHostPhase(t *testing.T, h *Host, phase string) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		if h.Snapshot().Phase == phase {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("host did not reach phase %s", phase)
+		default:
+			runtime.Gosched()
+		}
+	}
+}
+
+func TestHostSaturatedStartingPublicationHonorsCancellation(t *testing.T) {
+	h := newTestHost(t)
+	fillEventQueue(h)
+	port := freePort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		defer close(done)
+		_, err := h.Start(ctx, startRequest(localConfig(port), 1))
+		result <- err
+	}()
+	t.Cleanup(func() { h.Close(); <-done })
+	awaitHostPhase(t, h, "starting")
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("lost cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("starting publication outlived caller cancellation")
+	}
+	if s := h.Snapshot(); s.Phase != "failed" || h.daemon.Instance() != nil {
+		t.Fatalf("cancelled start left actual runtime: %+v", s)
+	}
+}
+
+func TestHostSaturatedConnectedPublicationHonorsCancellation(t *testing.T) {
+	var h *Host
+	var err error
+	h, err = NewHost(context.Background(), HostOptions{DataRoot: t.TempDir(), Emit: func(e Event) {
+		if e.Method != "snapshot" {
+			return
+		}
+		var s Snapshot
+		json.Unmarshal(e.Payload, &s)
+		if s.Phase == "starting" && s.ConfigGeneration == 1 {
+			fillEventQueue(h)
+		}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	result := make(chan Event, 1)
+	port := freePort(t)
+	start := startRequest(localConfig(port), 1)
+	payload, err := json.Marshal(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := Request{Version: 1, Kind: "request", ID: "saturated-connected", SessionID: start.SessionID, ConfigGeneration: start.ConfigGeneration, NetworkGeneration: start.NetworkGeneration, Method: "start", Payload: payload}
+	go func() { defer close(done); result <- Dispatch(ctx, h, request) }()
+	t.Cleanup(func() { h.Close(); <-done })
+	awaitHostPhase(t, h, "connected")
+	cancel()
+	select {
+	case response := <-result:
+		if response.Error == nil || response.Error.Code != "cancelled" || len(response.Payload) != 0 || response.ID != request.ID {
+			t.Fatalf("lost wire cancellation/correlation: %+v", response)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("connected publication outlived caller cancellation")
+	}
+	if s := h.Snapshot(); s.Phase != "failed" || h.daemon.Instance() != nil {
+		t.Fatalf("undelivered start remained successful: %+v", s)
+	}
+	c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+	if err == nil {
+		c.Close()
+		t.Fatal("undelivered connected transition leaked listener")
+	}
+	// A cancelled operation cannot leave delayed cleanup for a later generation.
+	for len(h.events) > 0 {
+		<-h.events
+	}
+	if _, err = h.Start(context.Background(), startRequest(localConfig(freePort(t)), 2)); err != nil {
+		t.Fatalf("later generation blocked/failed: %v", err)
+	}
+	if h.daemon.Instance() == nil || h.Snapshot().Phase != "connected" {
+		t.Fatal("cancelled generation tore down the following start")
+	}
+}
+
+func TestHostSaturatedFatalPublicationJoinsOnSubscriptionCancellation(t *testing.T) {
+	h := newTestHost(t)
+	if _, err := h.Start(context.Background(), startRequest(localConfig(freePort(t)), 1)); err != nil {
+		t.Fatal(err)
+	}
+	fillEventQueue(h)
+	h.daemon.SetError(errors.New("private fatal detail"))
+	awaitHostPhase(t, h, "failed")
+	done := make(chan struct{})
+	go func() { h.operation.Lock(); defer h.operation.Unlock(); h.endStreams(); close(done) }()
+	t.Cleanup(func() { h.Close(); <-done })
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("fatal publication prevented cancelled subscription join")
+	}
+	if h.daemon.Instance() != nil {
+		t.Fatal("fatal cleanup left active instance")
+	}
+	if s := h.Snapshot(); s.Phase != "failed" || s.Error == nil || strings.Contains(s.Error.Message, "private") {
+		t.Fatalf("actual fatal snapshot lost/sensitive: %+v", s)
+	}
+}
+
+func TestHostSaturatedStopPublicationHonorsDeadline(t *testing.T) {
+	h := newTestHost(t)
+	fillEventQueue(h)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	result := make(chan error, 1)
+	go func() { defer close(done); result <- h.Stop(ctx, "test") }()
+	t.Cleanup(func() { h.Close(); <-done })
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("stop delivery reported success/lost deadline: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stop publication outlived caller deadline")
+	}
+	if h.Snapshot().Phase != "stopped" {
+		t.Fatal("delivery failure falsified actual stopped phase")
+	}
+}
 
 // Passive boundary instrumentation: preserve the actual direct outbound and
 // expose existing core interface-reset completion without changing the monitor.

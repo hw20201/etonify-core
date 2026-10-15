@@ -43,13 +43,14 @@ func (*daemonStream[T]) RecvMsg(any) error {
 
 func (h *Host) beginStreams(d *daemon.StartedService, generation Snapshot) {
 	ctx, cancel := context.WithCancel(h.ctx)
+	dataCtx, cancelData := context.WithCancel(ctx)
 	h.streamCancel = cancel
-	start := func(run func() error) {
+	start := func(owner context.Context, run func() error) {
 		h.streamWG.Add(1)
 		go func() {
 			defer h.streamWG.Done()
-			if err := run(); err != nil && ctx.Err() == nil {
-				h.streamError(ctx, generation)
+			if err := run(); err != nil && owner.Err() == nil {
+				h.streamError(owner, generation)
 			}
 		}()
 	}
@@ -58,29 +59,32 @@ func (h *Host) beginStreams(d *daemon.StartedService, generation Snapshot) {
 		if err != nil {
 			return err
 		}
-		_, err = h.publishBounded(ctx, event)
+		_, err = h.publishBounded(dataCtx, event)
 		return err
 	}
-	start(func() error {
-		return d.SubscribeGroups(&emptypb.Empty{}, &daemonStream[daemon.Groups]{ctx, func(v *daemon.Groups) error { return send("groups", v) }})
+	start(dataCtx, func() error {
+		return d.SubscribeGroups(&emptypb.Empty{}, &daemonStream[daemon.Groups]{dataCtx, func(v *daemon.Groups) error { return send("groups", v) }})
 	})
-	start(func() error {
-		return d.SubscribeStatus(&daemon.SubscribeStatusRequest{Interval: int64(time.Second)}, &daemonStream[daemon.Status]{ctx, func(v *daemon.Status) error { return send("traffic", v) }})
+	start(dataCtx, func() error {
+		return d.SubscribeStatus(&daemon.SubscribeStatusRequest{Interval: int64(time.Second)}, &daemonStream[daemon.Status]{dataCtx, func(v *daemon.Status) error { return send("traffic", v) }})
 	})
-	start(func() error {
-		return d.SubscribeLog(&emptypb.Empty{}, &daemonStream[daemon.Log]{ctx, func(v *daemon.Log) error { return send("logs", v) }})
+	start(dataCtx, func() error {
+		return d.SubscribeLog(&emptypb.Empty{}, &daemonStream[daemon.Log]{dataCtx, func(v *daemon.Log) error { return send("logs", v) }})
 	})
-	start(func() error {
-		return d.SubscribeURLTestUpdates(&emptypb.Empty{}, &daemonStream[daemon.URLTestUpdate]{ctx, func(v *daemon.URLTestUpdate) error { return send("urlTest", v) }})
+	start(dataCtx, func() error {
+		return d.SubscribeURLTestUpdates(&emptypb.Empty{}, &daemonStream[daemon.URLTestUpdate]{dataCtx, func(v *daemon.URLTestUpdate) error { return send("urlTest", v) }})
 	})
-	start(func() error {
+	start(ctx, func() error {
 		return d.SubscribeServiceStatus(&emptypb.Empty{}, &daemonStream[daemon.ServiceStatus]{ctx, func(v *daemon.ServiceStatus) error {
 			if v.Status != daemon.ServiceStatus_FATAL {
 				return nil
 			}
 			// A daemon fatal must not leave the GUI connected or a proxy active.
 			// Never forward raw config/credential-bearing daemon diagnostics.
-			cancel()
+			// Stop sibling producers without cancelling this fatal publication.
+			// endStreams owns the outer cancellation and can always join us.
+			cancelData()
+			defer cancel()
 			_ = d.CloseService()
 			h.mu.Lock()
 			s := h.state
@@ -93,7 +97,9 @@ func (h *Host) beginStreams(d *daemon.StartedService, generation Snapshot) {
 			}
 			h.mu.Unlock()
 			if current {
-				h.publishSnapshot(s)
+				if err := h.publishSnapshot(ctx, s); err != nil {
+					return err
+				}
 			}
 			return errCaptured
 		}})
