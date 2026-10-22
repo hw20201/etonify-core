@@ -7,6 +7,7 @@ import (
 	"github.com/gofrs/uuid/v5"
 	"github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/endpointpin"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
@@ -43,6 +44,7 @@ type Instance struct {
 	// to callers: request plans copy and validate only this immutable snapshot.
 	publicIPConfig     []byte
 	publicIPGeneration string
+	publicIPEndpoints  *endpointpin.Store
 }
 
 func (s *StartedService) CheckConfig(ctx context.Context, configContent string) error {
@@ -135,6 +137,12 @@ func (s *StartedService) newInstance(ctx context.Context, profileContent string,
 		cancel()
 		return nil, err
 	}
+	endpointStore, err := endpointpin.New(configSnapshot, generation.String(), urlTestHistoryStorage.Generation)
+	if err != nil {
+		cancel()
+		return nil, E.Cause(err, "freeze authenticated endpoint identities")
+	}
+	ctx = service.ContextWithPtr(ctx, endpointStore)
 	i := &Instance{
 		ctx:                   ctx,
 		cancel:                cancel,
@@ -142,6 +150,7 @@ func (s *StartedService) newInstance(ctx context.Context, profileContent string,
 		externalInfoResolver:  newOutboundExternalInfoResolver(),
 		publicIPConfig:        configSnapshot,
 		publicIPGeneration:    generation.String(),
+		publicIPEndpoints:     endpointStore,
 	}
 	boxInstance, err := box.New(box.Options{
 		Context:           ctx,

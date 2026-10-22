@@ -81,8 +81,25 @@ func (s *StartedService) LookupPublicIP(ctx context.Context, request *PublicIPLo
 	stopInstance := context.AfterFunc(instance.ctx, cancel)
 	defer stopInstance()
 	// Query-only watcher. It neither resets nor closes any shared VPN/DNS client.
-	go watchPublicIPGeneration(queryCtx, cancel, networkGeneration, instance.urlTestHistoryStorage.Generation)
-	plan, err := scopedhttp.NewPlan(instance.publicIPConfig, chain)
+	go watchPublicIPValidity(queryCtx, cancel, func() bool {
+		s.serviceAccess.RLock()
+		defer s.serviceAccess.RUnlock()
+		if s.instance != instance || s.serviceStatus.Status != ServiceStatus_STARTED || networkGeneration != instance.urlTestHistoryStorage.Generation() {
+			return false
+		}
+		current, err := freezePublicIPChain(instance.outboundManager, request.OutboundTag)
+		return err == nil && slices.Equal(chain, current)
+	})
+	var plan *scopedhttp.Plan
+	if instance.publicIPEndpoints != nil {
+		if pin, ok := instance.publicIPEndpoints.Load(chain[len(chain)-1], networkGeneration); ok {
+			plan, err = scopedhttp.NewPlanWithEndpointPin(instance.publicIPConfig, chain, pin, instance.publicIPGeneration, networkGeneration)
+		} else {
+			plan, err = scopedhttp.NewPlan(instance.publicIPConfig, chain)
+		}
+	} else {
+		plan, err = scopedhttp.NewPlan(instance.publicIPConfig, chain)
+	}
 	if err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition, "unsupported scoped query configuration: %v", err)
 	}
@@ -97,6 +114,9 @@ func (s *StartedService) LookupPublicIP(ctx context.Context, request *PublicIPLo
 	}
 	if err := queryCtx.Err(); err != nil {
 		return nil, err
+	}
+	if !plan.EndpointPinCurrent() {
+		return nil, status.Error(codes.Aborted, "scoped query endpoint observation expired")
 	}
 	s.serviceAccess.RLock()
 	defer s.serviceAccess.RUnlock()
@@ -119,6 +139,10 @@ func (s *StartedService) LookupPublicIP(ctx context.Context, request *PublicIPLo
 }
 
 func watchPublicIPGeneration(ctx context.Context, cancel context.CancelFunc, initial uint64, generation func() uint64) {
+	watchPublicIPValidity(ctx, cancel, func() bool { return generation() == initial })
+}
+
+func watchPublicIPValidity(ctx context.Context, cancel context.CancelFunc, valid func() bool) {
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -126,7 +150,7 @@ func watchPublicIPGeneration(ctx context.Context, cancel context.CancelFunc, ini
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if generation() != initial {
+			if !valid() {
 				cancel()
 				return
 			}

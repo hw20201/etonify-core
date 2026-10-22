@@ -7,6 +7,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/common/endpointpin"
 	"github.com/sagernet/sing-box/common/mux"
 	"github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
@@ -20,6 +21,7 @@ import (
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/service"
 )
 
 func RegisterOutbound(registry *outbound.Registry) {
@@ -34,16 +36,19 @@ var (
 
 type Outbound struct {
 	outbound.Adapter
-	logger          logger.ContextLogger
-	dialer          N.Dialer
-	client          *protocolClient
-	serverAddr      M.Socksaddr
-	multiplexDialer *mux.Client
-	tlsConfig       tls.Config
-	tlsDialer       tls.Dialer
-	transport       adapter.V2RayClientTransport
-	packetAddr      bool
-	xudp            bool
+	logger                             logger.ContextLogger
+	dialer                             N.Dialer
+	client                             *protocolClient
+	serverAddr                         M.Socksaddr
+	multiplexDialer                    *mux.Client
+	tlsConfig                          tls.Config
+	tlsDialer                          tls.Dialer
+	transport                          adapter.V2RayClientTransport
+	packetAddr                         bool
+	xudp                               bool
+	endpointPin                        *endpointpin.Store
+	endpointPinLeaf, endpointPinServer string
+	endpointPinPort                    uint16
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VLESSOutboundOptions) (adapter.Outbound, error) {
@@ -57,6 +62,15 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		dialer:     outboundDialer,
 		serverAddr: options.ServerOptions.Build(),
 	}
+	if options.TLS != nil && options.TLS.Enabled && options.TLS.Reality != nil && options.TLS.Reality.Enabled && options.ServerIsDomain() && options.DialerOptions.Detour == "" && options.Transport == nil && !common.PtrValueOrDefault(options.Multiplex).Enabled && options.Encryption == "" {
+		outbound.endpointPin = service.PtrFromContext[endpointpin.Store](ctx)
+		if outbound.endpointPin != nil && !outbound.endpointPin.MatchesSource(tag, options) {
+			outbound.endpointPin = nil
+		}
+		if outbound.endpointPin != nil {
+			outbound.endpointPinLeaf, outbound.endpointPinServer, outbound.endpointPinPort = tag, options.Server, options.ServerPort
+		}
+	}
 	if options.TLS != nil {
 		outbound.tlsConfig, err = tls.NewClientWithOptions(tls.ClientOptions{
 			Context:       ctx,
@@ -69,6 +83,12 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		})
 		if err != nil {
 			return nil, err
+		}
+		// Options alone are not an authentication proof: alternative TLS engines
+		// or wrappers must not publish a Reality observation accidentally.
+		profile, realityProfile := outbound.tlsConfig.(interface{ IsReality() bool })
+		if !realityProfile || !profile.IsReality() {
+			outbound.endpointPin = nil
 		}
 		outbound.tlsDialer = tls.NewDialer(outboundDialer, outbound.tlsConfig)
 	}
@@ -188,6 +208,11 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 	metadata.Destination = destination
 	var conn net.Conn
 	var err error
+	observeEndpoint := N.NetworkName(network) == N.NetworkTCP && h.endpointPin != nil && h.tlsDialer != nil && h.transport == nil
+	var startedGeneration uint64
+	if observeEndpoint {
+		startedGeneration = h.endpointPin.Generation()
+	}
 	if h.transport != nil {
 		conn, err = h.transport.DialContext(ctx)
 	} else if h.tlsDialer != nil {
@@ -201,7 +226,17 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 	switch N.NetworkName(network) {
 	case N.NetworkTCP:
 		h.logger.InfoContext(ctx, "outbound connection to ", destination)
-		return h.client.DialEarlyConn(ctx, conn, destination)
+		protocolConn, err := h.client.DialEarlyConn(ctx, conn, destination)
+		if err != nil {
+			common.Close(conn)
+			return nil, err
+		}
+		// This proves the Reality peer, not remote acceptance of a VLESS user.
+		// The private query still sends/authenticates its own frozen UUID/flow.
+		if observeEndpoint && ctx.Err() == nil {
+			h.endpointPin.Observe(h.endpointPinLeaf, h.endpointPinServer, h.endpointPinPort, conn.RemoteAddr(), startedGeneration)
+		}
+		return protocolConn, nil
 	case N.NetworkUDP:
 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
 		if h.xudp {

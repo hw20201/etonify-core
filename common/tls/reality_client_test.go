@@ -12,8 +12,10 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"math/big"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +32,15 @@ func TestRealityClientFallbackURL(t *testing.T) {
 	require.Equal(t, "https://example.com/path", realityClientFallbackURL("example.com", "/path"))
 	require.Equal(t, "https://example.com?ed=2560", realityClientFallbackURL("example.com", "?ed=2560"))
 	require.Equal(t, "https://example.com/path", realityClientFallbackURL("example.com", "path"))
+}
+
+func TestRealityFallbackDisabledContext(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	require.False(t, realityFallbackDisabled(ctx))
+	require.True(t, realityFallbackDisabled(WithRealityFallbackDisabled(ctx)))
+	require.False(t, realityFallbackDisabled(ctx), "opt-in must not mutate the shared parent context")
 }
 
 func generateTestCertificate() (tls.Certificate, error) {
@@ -220,7 +231,73 @@ func TestRealityClientHandshake_MinClientVer_Rejection(t *testing.T) {
 	}, false)
 	require.NoError(t, err)
 
-	_, err = realityClient.Client(clientConn)
+	_, err = realityClient.(*RealityClientConfig).ClientHandshake(WithRealityFallbackDisabled(context.Background()), clientConn)
 	require.Error(t, err)
 }
 
+type fallbackRecordingConn struct {
+	mu     sync.Mutex
+	writes int
+	closed bool
+}
+
+func (c *fallbackRecordingConn) Read([]byte) (int, error) { return 0, errors.New("unexpected read") }
+func (c *fallbackRecordingConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writes += len(p)
+	return len(p), nil
+}
+func (c *fallbackRecordingConn) Close() error {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+	return nil
+}
+func (*fallbackRecordingConn) LocalAddr() net.Addr              { return fallbackRecordingAddr("local") }
+func (*fallbackRecordingConn) RemoteAddr() net.Addr             { return fallbackRecordingAddr("remote") }
+func (*fallbackRecordingConn) SetDeadline(time.Time) error      { return nil }
+func (*fallbackRecordingConn) SetReadDeadline(time.Time) error  { return nil }
+func (*fallbackRecordingConn) SetWriteDeadline(time.Time) error { return nil }
+
+type fallbackRecordingAddr string
+
+func (a fallbackRecordingAddr) Network() string { return "test" }
+func (a fallbackRecordingAddr) String() string  { return string(a) }
+
+func TestRealityVerificationFailedFallbackPolicy(t *testing.T) {
+	t.Run("opt-in disables fallback and closes without writing", func(t *testing.T) {
+		conn := &fallbackRecordingConn{}
+		fallbackCalled := make(chan struct{}, 1)
+		err := realityVerificationFailed(WithRealityFallbackDisabled(context.Background()), conn, func() { fallbackCalled <- struct{}{} })
+		require.EqualError(t, err, "reality verification failed")
+		conn.mu.Lock()
+		require.True(t, conn.closed)
+		require.Zero(t, conn.writes)
+		conn.mu.Unlock()
+		select {
+		case <-fallbackCalled:
+			t.Fatal("fallback must not run")
+		default:
+		}
+	})
+
+	t.Run("default preserves asynchronous fallback", func(t *testing.T) {
+		conn := &fallbackRecordingConn{}
+		fallbackCalled := make(chan struct{})
+		err := realityVerificationFailed(context.Background(), conn, func() {
+			defer close(fallbackCalled)
+			_ = conn.Close() // Simulate completion/cleanup by the ordinary background fallback.
+		})
+		require.EqualError(t, err, "reality verification failed")
+		select {
+		case <-fallbackCalled:
+		case <-time.After(time.Second):
+			t.Fatal("default fallback was not started")
+		}
+		conn.mu.Lock()
+		require.True(t, conn.closed)
+		require.Zero(t, conn.writes)
+		conn.mu.Unlock()
+	})
+}

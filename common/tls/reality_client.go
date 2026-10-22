@@ -239,11 +239,21 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	}
 
 	if !verifier.verified {
-		go realityClientFallback(e.ctx, uConn, e.uClient.ServerName(), e.uClient.id, e.spiderX)
-		return nil, E.New("reality verification failed")
+		return nil, realityVerificationFailed(ctx, uConn, func() {
+			realityClientFallback(e.ctx, uConn, e.uClient.ServerName(), e.uClient.id, e.spiderX)
+		})
 	}
 
 	return &realityClientConnWrapper{uConn}, nil
+}
+
+func realityVerificationFailed(ctx context.Context, conn net.Conn, fallback func()) error {
+	if realityFallbackDisabled(ctx) {
+		_ = conn.Close()
+		return E.New("reality verification failed")
+	}
+	go fallback()
+	return E.New("reality verification failed")
 }
 
 func realityClientFallback(ctx context.Context, uConn net.Conn, serverName string, fingerprint utls.ClientHelloID, spiderX string) {

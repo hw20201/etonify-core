@@ -165,7 +165,7 @@ func TestDomainRealityApplicationGraphFailsClosedWithoutEndpointPin(t *testing.T
 	// Numeric provider destinations do not eliminate the dependency: the node's
 	// own server is a domain, while remote DNS itself needs this same node first.
 	plan, err := NewPlan(appDefaultDomainReality, []string{"select", "domain-reality"})
-	if plan != nil || err == nil || err.Error() != "[PIP_CFG:outbound.protocol.vless]" {
+	if plan != nil || err == nil || err.Error() != "[PIP_CFG:outbound.bootstrap.pin_required]" {
 		t.Fatalf("unproven full dependency chain accepted: plan=%v err=%v", plan, err)
 	}
 }

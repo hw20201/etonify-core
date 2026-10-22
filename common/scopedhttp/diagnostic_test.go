@@ -14,7 +14,7 @@ func TestAppDefaultDependencyDiagnostics(t *testing.T) {
 		change     func(map[string]any, map[string]any, map[string]any)
 	}{
 		{"vless", "outbound.protocol.vless", func(_ map[string]any, leaf, _ map[string]any) { leaf["type"] = "vless"; leaf["uuid"] = "private-uuid" }},
-		{"vless Reality hostname precedes TLS bootstrap and DNS", "outbound.protocol.vless", func(root map[string]any, leaf, _ map[string]any) {
+		{"vless Reality hostname precedes TLS bootstrap and DNS", "outbound.bootstrap.pin_required", func(root map[string]any, leaf, _ map[string]any) {
 			leaf["type"] = "vless"
 			leaf["server"] = "private-endpoint.example"
 			leaf["uuid"] = "private-uuid"

@@ -12,6 +12,10 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/sagernet/sing-box/common/endpointpin"
+	"github.com/sagernet/sing-box/option"
 )
 
 const bodyLimit = 16 << 10
@@ -28,6 +32,8 @@ type Plan struct {
 	id    string
 	proxy proxyConfig
 	dns   dnsConfig
+	vless *option.VLESSOutboundOptions
+	pin   *endpointpin.Pin
 }
 
 func (p *Plan) ID() string {
@@ -99,6 +105,16 @@ func literal(raw string) (netip.Addr, error) {
 }
 
 func NewPlan(snapshot []byte, chain []string) (plan *Plan, err error) {
+	return newPlan(snapshot, chain, nil, "", 0)
+}
+
+// NewPlanWithEndpointPin consumes an observation from the running core's
+// authenticated-peer store. It never resolves the node hostname or reads DNS.
+func NewPlanWithEndpointPin(snapshot []byte, chain []string, pin endpointpin.Pin, coreID string, generation uint64) (*Plan, error) {
+	return newPlan(snapshot, chain, &pin, coreID, generation)
+}
+
+func newPlan(snapshot []byte, chain []string, pin *endpointpin.Pin, coreID string, generation uint64) (plan *Plan, err error) {
 	stage := "selection.invalid"
 	defer func() { err = configurationDiagnostic(err, stage) }()
 	if len(chain) == 0 || len(chain) > 32 {
@@ -162,7 +178,20 @@ func NewPlan(snapshot []byte, chain []string) (plan *Plan, err error) {
 	leaf := byTag[chain[len(chain)-1]]
 	typ := text(leaf, "type")
 	stage = "outbound.invalid"
-	if typ != "socks" && typ != "http" && typ != "shadowsocks" {
+	var vlessOptions *option.VLESSOutboundOptions
+	server := text(leaf, "server")
+	if requiresRealityEndpointPin(leaf) {
+		if pin == nil || !pin.Valid(snapshot, chain, coreID, generation, time.Now()) {
+			return nil, reject("outbound.bootstrap.pin_required")
+		}
+		vlessOptions, err = parseVLESSRealityProxy(leaf)
+		if err != nil {
+			return nil, err
+		}
+		server = pin.Addr.String()
+		vlessOptions.Server = server
+	}
+	if typ != "socks" && typ != "http" && typ != "shadowsocks" && vlessOptions == nil {
 		switch typ {
 		case "vless", "trojan", "direct":
 			return nil, reject("outbound.protocol." + typ)
@@ -176,7 +205,7 @@ func NewPlan(snapshot []byte, chain []string) (plan *Plan, err error) {
 		if err != nil {
 			return nil, err
 		}
-	} else {
+	} else if vlessOptions == nil {
 		// A whitelist, not a blacklist: future options cannot silently add DNS,
 		// detours, multiplexing, TLS fetching, TFO or transport side dependencies.
 		if err := keysOnly(leaf, "type", "tag", "server", "server_port", "username", "password", "version", "tcp_fast_open", "tcp_multi_path"); err != nil {
@@ -193,7 +222,7 @@ func NewPlan(snapshot []byte, chain []string) (plan *Plan, err error) {
 			return nil, errors.New("only HTTP/1 CONNECT is scoped")
 		}
 	}
-	ip, err := literal(text(leaf, "server"))
+	ip, err := literal(server)
 	if err != nil {
 		if _, parseErr := netip.ParseAddr(text(leaf, "server")); parseErr != nil && validDNSHostname(text(leaf, "server")) {
 			return nil, reject("outbound.bootstrap.domain")
@@ -209,6 +238,11 @@ func NewPlan(snapshot []byte, chain []string) (plan *Plan, err error) {
 		proxyPassword = password
 	}
 	p := &Plan{proxy: proxyConfig{typ: typ, tag: chain[len(chain)-1], server: ip.String(), port: proxyPort, username: text(leaf, "username"), password: proxyPassword, method: method}}
+	if vlessOptions != nil {
+		copyPin := *pin
+		p.pin = &copyPin
+		p.vless = vlessOptions
+	}
 	if strings.ContainsAny(p.proxy.username+p.proxy.password, "\r\n") || len(p.proxy.username) > 255 || len(p.proxy.password) > 255 {
 		return nil, errors.New("invalid scoped proxy credentials")
 	}
@@ -244,8 +278,16 @@ func NewPlan(snapshot []byte, chain []string) (plan *Plan, err error) {
 	digest.Write(snapshot)
 	digest.Write([]byte{0})
 	digest.Write([]byte(strings.Join(chain, "\x00")))
+	if p.pin != nil {
+		digest.Write([]byte(fmt.Sprintf("\x00%s\x00%s\x00%d\x00%s", p.pin.Addr, p.pin.CoreID, p.pin.NetworkGeneration, p.pin.Expires.Format(time.RFC3339Nano))))
+	}
 	p.id = hex.EncodeToString(digest.Sum(nil))
 	return p, nil
+}
+
+// EndpointPinCurrent is rechecked before every private VLESS dial and return.
+func (p *Plan) EndpointPinCurrent() bool {
+	return p != nil && (p.pin == nil || time.Now().Before(p.pin.Expires))
 }
 
 // Assert the public constructor's context contract before allocating sockets.

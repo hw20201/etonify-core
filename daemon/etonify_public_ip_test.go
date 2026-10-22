@@ -154,7 +154,7 @@ func TestPublicIPRPCDomainRealityWithoutEndpointPin(t *testing.T) {
 			RequestID: "domain-reality-regression", OutboundTag: "select",
 			Provider: provider, TimeoutMillis: 1000,
 		})
-		if result != nil || status.Code(err) != codes.FailedPrecondition || status.Convert(err).Message() != "unsupported scoped query configuration: [PIP_CFG:outbound.protocol.vless]" {
+		if result != nil || status.Code(err) != codes.FailedPrecondition || status.Convert(err).Message() != "unsupported scoped query configuration: [PIP_CFG:outbound.bootstrap.pin_required]" {
 			t.Fatalf("%s: unproven dependency graph accepted: result=%v err=%v", provider, result, err)
 		}
 	}

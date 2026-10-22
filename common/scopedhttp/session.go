@@ -19,6 +19,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/dialer"
+	boxtls "github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/option"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -58,8 +59,18 @@ func NewSession(ctx, instanceContext context.Context, plan *Plan) (*Session, err
 	}
 	s := newSession(ctx, instanceContext, plan)
 	proxyAddr := M.ParseSocksaddr(net.JoinHostPort(plan.proxy.server, strconv.Itoa(int(plan.proxy.port))))
-	if plan.proxy.typ == "shadowsocks" {
-		outbound, scope, err := newScopedShadowsocks(instanceContext, plan.proxy.tag, plan.proxy.server, plan.proxy.port, plan.proxy.method, plan.proxy.password)
+	if plan.proxy.typ == "shadowsocks" || plan.vless != nil {
+		var outbound adapter.Outbound
+		var scope *adapter.Scope
+		if plan.vless != nil {
+			if !plan.EndpointPinCurrent() {
+				s.Close()
+				return nil, reject("outbound.bootstrap.pin_required")
+			}
+			outbound, scope, err = newScopedVLESS(instanceContext, plan.proxy.tag, *plan.vless)
+		} else {
+			outbound, scope, err = newScopedShadowsocks(instanceContext, plan.proxy.tag, plan.proxy.server, plan.proxy.port, plan.proxy.method, plan.proxy.password)
+		}
 		if err != nil {
 			s.Close()
 			return nil, err
@@ -73,7 +84,12 @@ func NewSession(ctx, instanceContext context.Context, plan *Plan) (*Session, err
 		}
 		s.proxyScope = scope
 		s.access.Unlock()
-		s.proxyDial = outbound.DialContext
+		s.proxyDial = func(ctx context.Context, network string, target M.Socksaddr) (net.Conn, error) {
+			if plan.vless != nil && (network != "tcp" || !plan.EndpointPinCurrent()) {
+				return nil, reject("outbound.bootstrap.pin_required")
+			}
+			return outbound.DialContext(ctx, network, target)
+		}
 	} else if plan.proxy.typ == "socks" {
 		client := socks.NewClient(bottom, proxyAddr, socks.Version5, plan.proxy.username, plan.proxy.password)
 		s.proxyDial = client.DialContext
@@ -130,7 +146,14 @@ func NewSession(ctx, instanceContext context.Context, plan *Plan) (*Session, err
 }
 
 func newSession(ctx, instanceContext context.Context, plan *Plan) *Session {
+	// The private Reality adapter must not start a camouflage request after
+	// failed identity verification. The ordinary VPN's policy is untouched.
+	ctx = boxtls.WithRealityFallbackDisabled(ctx)
 	queryCtx, cancel := context.WithCancel(ctx)
+	if plan.pin != nil {
+		cancel()
+		queryCtx, cancel = context.WithDeadline(ctx, plan.pin.Expires)
+	}
 	s := &Session{ctx: queryCtx, cancel: cancel, plan: plan, conns: make(map[*ownedConn]struct{}), cache: make(map[string][]netip.Addr)}
 	s.transport = &http.Transport{Proxy: nil, DialContext: s.dialHTTP, DisableKeepAlives: true, ForceAttemptHTTP2: false,
 		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: adapter.RootPoolFromContext(instanceContext), Time: ntp.TimeFuncFromContext(instanceContext)},
