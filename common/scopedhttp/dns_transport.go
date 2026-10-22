@@ -44,10 +44,10 @@ func parseDNSConfig(o map[string]json.RawMessage, proxyType string) (dnsConfig, 
 	case "https":
 		fallback = 443
 	default:
-		return d, fmt.Errorf("unsupported scoped DNS type: %s", d.typ)
+		return d, reject("dns.type")
 	}
 	if d.typ == "udp" && proxyType != "socks" {
-		return d, errors.New("UDP DNS requires scoped SOCKS5")
+		return d, reject("dns.type")
 	}
 	if ip, err := literal(d.host); err == nil {
 		d.host = ip.String()
@@ -56,7 +56,7 @@ func parseDNSConfig(o map[string]json.RawMessage, proxyType string) (dnsConfig, 
 			return d, errors.New("invalid scoped DNS endpoint address")
 		}
 		if d.typ != "https" && d.typ != "tls" {
-			return d, errors.New("unsupported scoped DNS endpoint bootstrap")
+			return d, reject("dns.bootstrap")
 		}
 		if !validDNSHostname(d.host) {
 			return d, errors.New("unsupported scoped DNS endpoint")
@@ -64,11 +64,11 @@ func parseDNSConfig(o map[string]json.RawMessage, proxyType string) (dnsConfig, 
 		// Only the app's bootstrap hint is understood. An arbitrary resolver graph
 		// cannot be discarded or replaced by this deliberately scoped policy.
 		if resolver := text(o, "domain_resolver"); resolver != "dns-local" {
-			return d, errors.New("unsupported scoped DNS bootstrap resolver")
+			return d, reject("dns.bootstrap")
 		}
 	}
 	if raw, ok := o["domain_resolver"]; ok && string(raw) != "\"dns-local\"" {
-		return d, errors.New("unsupported scoped DNS bootstrap resolver")
+		return d, reject("dns.bootstrap")
 	}
 	p, err := port(o, fallback)
 	if err != nil {

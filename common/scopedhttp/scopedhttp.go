@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sort"
 	"strings"
 )
 
@@ -42,7 +43,12 @@ func text(o map[string]json.RawMessage, key string) string {
 	return value
 }
 func keysOnly(o map[string]json.RawMessage, allowed ...string) error {
+	keys := make([]string, 0, len(o))
 	for key := range o {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
 		ok := false
 		for _, name := range allowed {
 			if key == name {
@@ -51,7 +57,7 @@ func keysOnly(o map[string]json.RawMessage, allowed ...string) error {
 			}
 		}
 		if !ok {
-			return fmt.Errorf("unsupported scoped option: %s", key)
+			return &optionError{key: key}
 		}
 	}
 	return nil
@@ -76,11 +82,11 @@ func validateProxySocketOptions(o map[string]json.RawMessage) error {
 	if raw, ok := o["tcp_fast_open"]; ok {
 		value := strings.TrimSpace(string(raw))
 		if value != "true" && value != "false" {
-			return errors.New("invalid scoped tcp_fast_open option")
+			return &optionError{key: "tcp_fast_open"}
 		}
 	}
 	if raw, ok := o["tcp_multi_path"]; ok && strings.TrimSpace(string(raw)) != "false" {
-		return errors.New("unsupported scoped tcp_multi_path option: must be false")
+		return &optionError{key: "tcp_multi_path"}
 	}
 	return nil
 }
@@ -92,7 +98,9 @@ func literal(raw string) (netip.Addr, error) {
 	return ip.Unmap(), nil
 }
 
-func NewPlan(snapshot []byte, chain []string) (*Plan, error) {
+func NewPlan(snapshot []byte, chain []string) (plan *Plan, err error) {
+	stage := "selection.invalid"
+	defer func() { err = configurationDiagnostic(err, stage) }()
 	if len(chain) == 0 || len(chain) > 32 {
 		return nil, errors.New("invalid scoped outbound chain")
 	}
@@ -104,6 +112,7 @@ func NewPlan(snapshot []byte, chain []string) (*Plan, error) {
 			Servers []map[string]json.RawMessage `json:"servers"`
 		} `json:"dns"`
 	}
+	stage = "snapshot.invalid"
 	if err := json.Unmarshal(snapshot, &root); err != nil {
 		return nil, fmt.Errorf("invalid scoped snapshot: %w", err)
 	}
@@ -118,6 +127,7 @@ func NewPlan(snapshot []byte, chain []string) (*Plan, error) {
 		}
 		byTag[tag] = outbound
 	}
+	stage = "selection.invalid"
 	seen := make(map[string]bool)
 	for i, tag := range chain {
 		o := byTag[tag]
@@ -151,11 +161,16 @@ func NewPlan(snapshot []byte, chain []string) (*Plan, error) {
 	}
 	leaf := byTag[chain[len(chain)-1]]
 	typ := text(leaf, "type")
+	stage = "outbound.invalid"
 	if typ != "socks" && typ != "http" && typ != "shadowsocks" {
-		return nil, fmt.Errorf("unsupported scoped outbound type: %s", typ)
+		switch typ {
+		case "vless", "trojan", "direct":
+			return nil, reject("outbound.protocol." + typ)
+		default:
+			return nil, reject("outbound.protocol.other")
+		}
 	}
 	method, password := "", ""
-	var err error
 	if typ == "shadowsocks" {
 		method, password, err = parseShadowsocksProxy(leaf)
 		if err != nil {
@@ -180,7 +195,10 @@ func NewPlan(snapshot []byte, chain []string) (*Plan, error) {
 	}
 	ip, err := literal(text(leaf, "server"))
 	if err != nil {
-		return nil, fmt.Errorf("proxy bootstrap DNS forbidden: %w", err)
+		if _, parseErr := netip.ParseAddr(text(leaf, "server")); parseErr != nil && validDNSHostname(text(leaf, "server")) {
+			return nil, reject("outbound.bootstrap.domain")
+		}
+		return nil, err
 	}
 	proxyPort, err := port(leaf, 0)
 	if err != nil {
@@ -197,8 +215,9 @@ func NewPlan(snapshot []byte, chain []string) (*Plan, error) {
 	// Routing rules are not silently ignored. Supporting a rule-dependent DNS
 	// graph requires freezing its result for every dependency first.
 	if len(root.DNS.Rules) > 0 {
-		return nil, errors.New("rule-dependent DNS is not yet safely scoped")
+		return nil, reject("dns.rules")
 	}
+	stage = "dns.invalid"
 	if root.DNS.Final == "" {
 		return nil, errors.New("explicit scoped DNS.final required")
 	}
@@ -215,7 +234,7 @@ func NewPlan(snapshot []byte, chain []string) (*Plan, error) {
 		return nil, errors.New("scoped DNS.final missing")
 	}
 	if !seen[text(selected, "detour")] {
-		return nil, errors.New("DNS must explicitly detour through the pinned selection chain")
+		return nil, reject("dns.detour")
 	}
 	p.dns, err = parseDNSConfig(selected, typ)
 	if err != nil {

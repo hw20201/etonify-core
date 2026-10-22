@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/urltest"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type publicIPTestManager struct {
@@ -91,5 +94,32 @@ func TestPublicIPRPCFailClosed(t *testing.T) {
 		if _, err := s.LookupPublicIP(context.Background(), req); err == nil {
 			t.Fatalf("accepted invalid or nonrunning request: %+v", req)
 		}
+	}
+}
+
+func TestPublicIPRPCConfigurationDiagnostic(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	leaf := publicIPTestLeaf{tag: "private-node"}
+	group := &publicIPTestGroup{publicIPTestLeaf: publicIPTestLeaf{tag: "select"}, selected: leaf}
+	s := &StartedService{
+		serviceStatus: &ServiceStatus{Status: ServiceStatus_STARTED},
+		instance: &Instance{
+			ctx:                   ctx,
+			outboundManager:       publicIPTestManager{items: map[string]adapter.Outbound{"select": group, "private-node": leaf}},
+			urlTestHistoryStorage: urltest.NewHistoryStorage(),
+			publicIPConfig:        []byte(`{"outbounds":[{"type":"selector","tag":"select","outbounds":["private-node"]},{"type":"vless","tag":"private-node","server":"private-host.example","uuid":"private-uuid"}]}`),
+		},
+	}
+	request := &PublicIPLookupRequest{RequestID: "diagnostic", OutboundTag: "select", Provider: "ipQuery", TimeoutMillis: 1000}
+	result, err := s.LookupPublicIP(ctx, request)
+	if result != nil || status.Code(err) != codes.FailedPrecondition || status.Convert(err).Message() != "unsupported scoped query configuration: [PIP_CFG:outbound.protocol.vless]" {
+		t.Fatalf("unexpected RPC rejection: %v %v", result, err)
+	}
+	// A missing selection must not include its sensitive tag in the RPC error.
+	request.OutboundTag = "private-missing-node"
+	result, err = s.LookupPublicIP(ctx, request)
+	if result != nil || status.Code(err) != codes.FailedPrecondition || status.Convert(err).Message() != "unsupported scoped query configuration: [PIP_CFG:selection.invalid]" {
+		t.Fatalf("unexpected selection rejection: %v %v", result, err)
 	}
 }

@@ -76,7 +76,7 @@ func (s *StartedService) LookupPublicIP(ctx context.Context, request *PublicIPLo
 	networkGeneration := instance.urlTestHistoryStorage.Generation()
 	s.serviceAccess.RUnlock()
 	if err != nil {
-		return nil, err
+		return nil, status.Error(codes.FailedPrecondition, "unsupported scoped query configuration: [PIP_CFG:selection.invalid]")
 	}
 	stopInstance := context.AfterFunc(instance.ctx, cancel)
 	defer stopInstance()

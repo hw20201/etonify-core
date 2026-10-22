@@ -10,6 +10,12 @@ DNS must have an explicit `final`, no rule-dependent selection, and an explicit 
 
 The application must start the query at the `select` root, not directly at its leaf: its default `dns-remote.detour` names `select`. The core freezes that root's current selector/URLTest chain and rejects changed selections before returning.
 
+## Safe configuration diagnostics
+
+Rejected plans return a static `[PIP_CFG:<code>]` token through the existing FailedPrecondition RPC. It identifies the **first** blocked dependency, not a complete list or a promise that removing it makes the remaining graph safe. Outbound validation precedes DNS validation; unsupported option keys are checked in sorted order for reproducibility. Codes distinguish VLESS/Trojan/direct/other protocols, domain proxy bootstrap, known outbound options such as `detour`, DNS rules, DNS detour/bootstrap/type/options, malformed snapshots and invalid selections. Unknown protocol names and option keys collapse to `other`/`unknown`. No node tag, endpoint, rule value, credential or raw parse error is included. The application must recognize only reviewed codes and must never display raw exceptions.
+
+The app-generated default SOCKS fixture is a compatibility fixture, **not** the user's selected node configuration. Tests also mutate it into synthetic VLESS, Trojan, domain-proxy, multihop and DNS-dependent cases and assert the exact safe rejection. A screenshot containing only a node label and a generic unsupported message cannot identify which case occurred. This diagnostic change deliberately does not broaden supported protocols, invoke a resolver, alter the VPN or introduce any fallback.
+
 ## Ownership and lifetime
 
 The bottom dialer preserves the running core's platform socket protection. Every provider destination is resolved by the private DNS exchange and passed as a numeric address to the proxy, so the proxy is never asked to resolve provider hostnames. TLS retains provider hostname verification, the core certificate pool and the core time source.
