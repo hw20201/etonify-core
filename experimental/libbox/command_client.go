@@ -36,6 +36,7 @@ type CommandClient struct {
 	clientAccess      sync.RWMutex
 	connectAccess     sync.Mutex
 	standalone        bool
+	publicIPRequests  publicIPRequestRegistry
 }
 
 type CommandClientOptions struct {

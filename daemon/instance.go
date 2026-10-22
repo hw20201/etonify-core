@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 
+	"github.com/gofrs/uuid/v5"
 	"github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
@@ -38,6 +39,10 @@ type Instance struct {
 	outboundManager       adapter.OutboundManager
 	endpointManager       adapter.EndpointManager
 	logFactory            log.Factory
+	// Encoded before Box.New can retain or mutate option pointers. Never exposed
+	// to callers: request plans copy and validate only this immutable snapshot.
+	publicIPConfig     []byte
+	publicIPGeneration string
 }
 
 func (s *StartedService) CheckConfig(ctx context.Context, configContent string) error {
@@ -120,11 +125,23 @@ func (s *StartedService) newInstance(ctx context.Context, profileContent string,
 	}
 	urlTestHistoryStorage := urltest.NewHistoryStorage()
 	ctx = service.ContextWithPtr(ctx, urlTestHistoryStorage)
+	configSnapshot, err := json.MarshalContext(ctx, options)
+	if err != nil {
+		cancel()
+		return nil, E.Cause(err, "freeze scoped query configuration")
+	}
+	generation, err := uuid.NewV4()
+	if err != nil {
+		cancel()
+		return nil, err
+	}
 	i := &Instance{
 		ctx:                   ctx,
 		cancel:                cancel,
 		urlTestHistoryStorage: urlTestHistoryStorage,
 		externalInfoResolver:  newOutboundExternalInfoResolver(),
+		publicIPConfig:        configSnapshot,
+		publicIPGeneration:    generation.String(),
 	}
 	boxInstance, err := box.New(box.Options{
 		Context:           ctx,

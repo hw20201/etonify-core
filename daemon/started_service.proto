@@ -23,6 +23,7 @@ service StartedService {
   rpc CancelURLTest(URLTestCancelRequest) returns(google.protobuf.Empty) {}
   rpc LookupOutboundExternalInfo(OutboundExternalInfoRequest) returns(OutboundExternalInfoResponse) {}
   rpc FetchURLViaOutbound(OutboundHTTPFetchRequest) returns(OutboundHTTPFetchResponse) {}
+  rpc LookupPublicIP(PublicIPLookupRequest) returns(PublicIPLookupResponse) {}
   rpc SelectOutbound(SelectOutboundRequest) returns (google.protobuf.Empty) {}
   rpc SetGroupExpand(SetGroupExpandRequest) returns (google.protobuf.Empty) {}
 
@@ -61,6 +62,24 @@ service StartedService {
 message Version {
   string version = 1;
   int32 apiVersion = 2;
+}
+
+// One whole provider query. Cancellation is the gRPC context, never a shared
+// client shutdown; both ipquery stages live in this same RPC and deadline.
+message PublicIPLookupRequest {
+  string requestID = 1;
+  string outboundTag = 2;
+  string provider = 3;
+  int64 networkGeneration = 4;
+  int32 timeoutMillis = 5;
+}
+
+message PublicIPLookupResponse {
+  string json = 1;
+  string planID = 2;
+  string coreGeneration = 3;
+  int64 networkGeneration = 4;
+  string outboundTag = 5;
 }
 
 message ServiceStatus {
