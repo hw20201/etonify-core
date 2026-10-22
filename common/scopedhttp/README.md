@@ -4,9 +4,11 @@ A public-IP query is one RPC, one deadline and one immutable configuration plan.
 
 ## Deliberately restricted support
 
-The initial audited subset is SOCKS5 and HTTP/1 CONNECT with a literal-IP proxy server and the basic server/port/credential options only. Explicit selector/URLTest memberships are validated against the snapshot. Direct outbounds, domain proxy servers, hidden detours, multiplexing, TLS/transport side dependencies, TFO and other unreviewed outbound options fail closed.
+The audited subset is SOCKS5, HTTP/1 CONNECT and basic Shadowsocks with a literal-IP proxy server. Shadowsocks uses a session-private core outbound and lifecycle scope, not the running outbound manager. Explicit selector/URLTest memberships are validated against the snapshot. The application's explicit TCP options are recognized. Query-only sockets always disable Fast Open (even if `tcp_fast_open:true` accelerates normal VPN sockets), because a query must not leave a cancellation-detached TFO probe. This changes only query transport performance, not the VPN setting. `tcp_multi_path:false` is accepted; enabled multipath and non-boolean values are rejected. Direct outbounds, domain proxy servers, hidden detours, multiplexing, Shadowsocks plugins/UoT, TLS/transport side dependencies, enabled multipath and other unreviewed outbound options fail closed. VLESS, Trojan and other unlisted protocols remain unsupported by this isolated query path.
 
-DNS must have an explicit `final`, no rule-dependent selection, a literal-IP TCP or UDP server, and an explicit detour naming the same frozen outbound selection chain. UDP requires SOCKS5. Local/system/HTTPS/TLS and other unreviewed DNS types fail closed. No default server, OS resolver, direct fallback or second outbound is substituted. DNS requests are raw session-owned exchanges through the private proxy. UDP truncation falls back to TCP through that same private proxy; there is no shared TCP/UDP multiplexer or cancellation-detached probe.
+DNS must have an explicit `final`, no rule-dependent selection, and an explicit detour naming the same frozen outbound selection chain. TCP, UDP, HTTPS (DoH) and TLS (DoT) are supported. UDP requires SOCKS5. DoH/DoT preserve certificate verification, configured endpoint/path and optional TLS server name; insecure TLS, redirects and unaudited dependencies are rejected. A literal-IP resolver needs no bootstrap. For a hostname DoH/DoT endpoint carrying the application's `domain_resolver:"dns-local"` bootstrap hint, this query-specific privacy policy deliberately resolves **only that DNS endpoint hostname at the pinned proxy**, instead of using the device's local DNS. This differs from normal VPN endpoint bootstrap: no device/OS DNS lookup is performed. Other bootstrap graphs fail closed. Provider names are still resolved using the configured DNS service, and their numeric addresses enter the proxy. No default server, direct fallback or second outbound is substituted. UDP truncation falls back to TCP through that same private proxy; there is no shared TCP/UDP multiplexer or cancellation-detached probe.
+
+The application must start the query at the `select` root, not directly at its leaf: its default `dns-remote.detour` names `select`. The core freezes that root's current selector/URLTest chain and rejects changed selections before returning.
 
 ## Ownership and lifetime
 
@@ -18,7 +20,7 @@ Only three fixed provider flows exist. ipquery uses `https://api.ipquery.io/` fo
 
 ## Evidence and limits
 
-Source tests cover real local SOCKS5/CONNECT sockets, DNS-to-provider numeric destinations on one proxy, A/AAAA/CNAME, UDP-to-TCP DNS fallback, snapshot/group validation, redirect rejection, IP consistency, bounded bodies, shared deadlines and request cancellation with other sessions/the shared gRPC client alive. Run:
+Source tests cover real local SOCKS5/CONNECT sockets, a decrypting Shadowsocks server with bidirectional payloads and session-owned socket closure, DNS-to-provider numeric destinations on one proxy, DoH/DoT certificate verification and proxy-only endpoint bootstrap, A/AAAA/CNAME, UDP-to-TCP DNS fallback, snapshot/group validation, redirect rejection, IP consistency, bounded bodies, shared deadlines and request cancellation with other sessions/the shared gRPC client alive. Run:
 
 ```sh
 go test -race -count=1 ./common/scopedhttp ./daemon ./experimental/libbox

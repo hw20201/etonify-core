@@ -39,6 +39,7 @@ type Session struct {
 	closed       bool
 	closeOnce    sync.Once
 	stopInstance func() bool
+	proxyScope   *adapter.Scope
 }
 
 func NewSession(ctx, instanceContext context.Context, plan *Plan) (*Session, error) {
@@ -57,7 +58,23 @@ func NewSession(ctx, instanceContext context.Context, plan *Plan) (*Session, err
 	}
 	s := newSession(ctx, instanceContext, plan)
 	proxyAddr := M.ParseSocksaddr(net.JoinHostPort(plan.proxy.server, strconv.Itoa(int(plan.proxy.port))))
-	if plan.proxy.typ == "socks" {
+	if plan.proxy.typ == "shadowsocks" {
+		outbound, scope, err := newScopedShadowsocks(instanceContext, plan.proxy.tag, plan.proxy.server, plan.proxy.port, plan.proxy.method, plan.proxy.password)
+		if err != nil {
+			s.Close()
+			return nil, err
+		}
+		s.access.Lock()
+		if s.closed || s.ctx.Err() != nil {
+			s.access.Unlock()
+			_ = scope.Close()
+			s.Close()
+			return nil, context.Canceled
+		}
+		s.proxyScope = scope
+		s.access.Unlock()
+		s.proxyDial = outbound.DialContext
+	} else if plan.proxy.typ == "socks" {
 		client := socks.NewClient(bottom, proxyAddr, socks.Version5, plan.proxy.username, plan.proxy.password)
 		s.proxyDial = client.DialContext
 	} else {
@@ -227,41 +244,48 @@ func (s *Session) exchange(name string, qtype uint16, network string) (*dns.Msg,
 	if err != nil {
 		return nil, err
 	}
-	conn, err := s.dialPinned(network, M.ParseSocksaddr(s.plan.dns.address))
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
 	var responseWire []byte
-	if network == "tcp" {
-		frame := make([]byte, 2+len(wire))
-		binary.BigEndian.PutUint16(frame, uint16(len(wire)))
-		copy(frame[2:], wire)
-		if _, err = io.Copy(conn, strings.NewReader(string(frame))); err != nil {
-			return nil, err
-		}
-		var prefix [2]byte
-		if _, err = io.ReadFull(conn, prefix[:]); err != nil {
-			return nil, err
-		}
-		n := int(binary.BigEndian.Uint16(prefix[:]))
-		if n < 12 {
-			return nil, errors.New("invalid DNS frame")
-		}
-		responseWire = make([]byte, n)
-		if _, err = io.ReadFull(conn, responseWire); err != nil {
+	if network == "https" || network == "tls" {
+		responseWire, err = s.encryptedDNS(wire)
+		if err != nil {
 			return nil, err
 		}
 	} else {
-		if _, err = conn.Write(wire); err != nil {
+		conn, err := s.dialPinned(network, M.ParseSocksaddr(s.plan.dns.address))
+		if err != nil {
 			return nil, err
 		}
-		buffer := make([]byte, 65535)
-		n, e := conn.Read(buffer)
-		if e != nil {
-			return nil, e
+		defer conn.Close()
+		if network == "tcp" {
+			frame := make([]byte, 2+len(wire))
+			binary.BigEndian.PutUint16(frame, uint16(len(wire)))
+			copy(frame[2:], wire)
+			if _, err = io.Copy(conn, strings.NewReader(string(frame))); err != nil {
+				return nil, err
+			}
+			var prefix [2]byte
+			if _, err = io.ReadFull(conn, prefix[:]); err != nil {
+				return nil, err
+			}
+			n := int(binary.BigEndian.Uint16(prefix[:]))
+			if n < 12 {
+				return nil, errors.New("invalid DNS frame")
+			}
+			responseWire = make([]byte, n)
+			if _, err = io.ReadFull(conn, responseWire); err != nil {
+				return nil, err
+			}
+		} else {
+			if _, err = conn.Write(wire); err != nil {
+				return nil, err
+			}
+			buffer := make([]byte, 65535)
+			n, e := conn.Read(buffer)
+			if e != nil {
+				return nil, e
+			}
+			responseWire = buffer[:n]
 		}
-		responseWire = buffer[:n]
 	}
 	answer := new(dns.Msg)
 	if err = answer.Unpack(responseWire); err != nil {
@@ -355,6 +379,7 @@ func (s *Session) Close() {
 		for c := range s.conns {
 			connections = append(connections, c)
 		}
+		proxyScope := s.proxyScope
 		s.access.Unlock()
 		for _, c := range connections {
 			c.Close()
@@ -362,6 +387,9 @@ func (s *Session) Close() {
 		s.transport.CloseIdleConnections()
 		if s.stopInstance != nil {
 			s.stopInstance()
+		}
+		if proxyScope != nil {
+			_ = proxyScope.Close()
 		}
 	})
 }

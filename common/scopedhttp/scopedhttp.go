@@ -9,19 +9,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/netip"
-	"strconv"
 	"strings"
 )
 
 const bodyLimit = 16 << 10
 
 type proxyConfig struct {
-	typ, tag, server, username, password string
-	port                                 uint16
+	typ, tag, server, username, password, method string
+	port                                         uint16
 }
-type dnsConfig struct{ typ, address string }
+type dnsConfig struct{ typ, address, host, serverName, path string }
 
 // Plan never retains caller-owned slices, live selectors, managers or outbound
 // objects. Credentials are private and only a digest leaves the core.
@@ -69,6 +67,22 @@ func port(o map[string]json.RawMessage, fallback uint16) (uint16, error) {
 		return 0, errors.New("invalid server port")
 	}
 	return uint16(v), nil
+}
+
+// Query sockets deliberately disable TFO even when the VPN enables it. It is
+// a performance hint, not a route/credential dependency; disabling it avoids
+// cancellation-detached connect probes. The normal VPN configuration is untouched.
+func validateProxySocketOptions(o map[string]json.RawMessage) error {
+	if raw, ok := o["tcp_fast_open"]; ok {
+		value := strings.TrimSpace(string(raw))
+		if value != "true" && value != "false" {
+			return errors.New("invalid scoped tcp_fast_open option")
+		}
+	}
+	if raw, ok := o["tcp_multi_path"]; ok && strings.TrimSpace(string(raw)) != "false" {
+		return errors.New("unsupported scoped tcp_multi_path option: must be false")
+	}
+	return nil
 }
 func literal(raw string) (netip.Addr, error) {
 	ip, err := netip.ParseAddr(raw)
@@ -137,20 +151,32 @@ func NewPlan(snapshot []byte, chain []string) (*Plan, error) {
 	}
 	leaf := byTag[chain[len(chain)-1]]
 	typ := text(leaf, "type")
-	if typ != "socks" && typ != "http" {
+	if typ != "socks" && typ != "http" && typ != "shadowsocks" {
 		return nil, fmt.Errorf("unsupported scoped outbound type: %s", typ)
 	}
-	// A whitelist, not a blacklist: future options cannot silently add DNS,
-	// detours, multiplexing, TLS fetching, TFO or transport side dependencies.
-	if err := keysOnly(leaf, "type", "tag", "server", "server_port", "username", "password", "version"); err != nil {
-		return nil, err
-	}
-	if typ == "socks" {
-		if v := text(leaf, "version"); v != "" && v != "5" {
-			return nil, errors.New("only SOCKS5 is scoped")
+	method, password := "", ""
+	var err error
+	if typ == "shadowsocks" {
+		method, password, err = parseShadowsocksProxy(leaf)
+		if err != nil {
+			return nil, err
 		}
-	} else if raw := leaf["version"]; len(raw) > 0 && string(raw) != "0" && string(raw) != "1" {
-		return nil, errors.New("only HTTP/1 CONNECT is scoped")
+	} else {
+		// A whitelist, not a blacklist: future options cannot silently add DNS,
+		// detours, multiplexing, TLS fetching, TFO or transport side dependencies.
+		if err := keysOnly(leaf, "type", "tag", "server", "server_port", "username", "password", "version", "tcp_fast_open", "tcp_multi_path"); err != nil {
+			return nil, err
+		}
+		if err := validateProxySocketOptions(leaf); err != nil {
+			return nil, err
+		}
+		if typ == "socks" {
+			if v := text(leaf, "version"); v != "" && v != "5" {
+				return nil, errors.New("only SOCKS5 is scoped")
+			}
+		} else if raw := leaf["version"]; len(raw) > 0 && string(raw) != "0" && string(raw) != "1" {
+			return nil, errors.New("only HTTP/1 CONNECT is scoped")
+		}
 	}
 	ip, err := literal(text(leaf, "server"))
 	if err != nil {
@@ -160,7 +186,11 @@ func NewPlan(snapshot []byte, chain []string) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Plan{proxy: proxyConfig{typ: typ, tag: chain[len(chain)-1], server: ip.String(), port: proxyPort, username: text(leaf, "username"), password: text(leaf, "password")}}
+	proxyPassword := text(leaf, "password")
+	if typ == "shadowsocks" {
+		proxyPassword = password
+	}
+	p := &Plan{proxy: proxyConfig{typ: typ, tag: chain[len(chain)-1], server: ip.String(), port: proxyPort, username: text(leaf, "username"), password: proxyPassword, method: method}}
 	if strings.ContainsAny(p.proxy.username+p.proxy.password, "\r\n") || len(p.proxy.username) > 255 || len(p.proxy.password) > 255 {
 		return nil, errors.New("invalid scoped proxy credentials")
 	}
@@ -184,28 +214,13 @@ func NewPlan(snapshot []byte, chain []string) (*Plan, error) {
 	if selected == nil {
 		return nil, errors.New("scoped DNS.final missing")
 	}
-	if err := keysOnly(selected, "type", "tag", "server", "server_port", "detour"); err != nil {
-		return nil, err
-	}
-	dnsType := text(selected, "type")
-	if dnsType != "tcp" && dnsType != "udp" {
-		return nil, fmt.Errorf("unsupported scoped DNS type: %s", dnsType)
-	}
-	if dnsType == "udp" && typ != "socks" {
-		return nil, errors.New("UDP DNS requires scoped SOCKS5")
-	}
 	if !seen[text(selected, "detour")] {
 		return nil, errors.New("DNS must explicitly detour through the pinned selection chain")
 	}
-	dnsIP, err := literal(text(selected, "server"))
+	p.dns, err = parseDNSConfig(selected, typ)
 	if err != nil {
 		return nil, err
 	}
-	dnsPort, err := port(selected, 53)
-	if err != nil {
-		return nil, err
-	}
-	p.dns = dnsConfig{typ: dnsType, address: net.JoinHostPort(dnsIP.String(), strconv.Itoa(int(dnsPort)))}
 	digest := sha256.New()
 	digest.Write(snapshot)
 	digest.Write([]byte{0})

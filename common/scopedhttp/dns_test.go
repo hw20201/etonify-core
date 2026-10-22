@@ -128,7 +128,6 @@ func TestPlanRejectsUnauditedDependencies(t *testing.T) {
 		{"detour", `"server_port":8080`, `"server_port":8080,"detour":"other"`},
 		{"proxy-DNS", `"192.0.2.10"`, `"proxy.example"`},
 		{"mux", `"server_port":8080`, `"server_port":8080,"multiplex":{"enabled":true}`},
-		{"TFO", `"server_port":8080`, `"server_port":8080,"tcp_fast_open":true`},
 		{"DNS-other-outbound", `"detour":"leaf"`, `"detour":"other"`},
 		{"DNS-shared-type", `"type":"tcp"`, `"type":"local"`},
 		{"DNS-rules", `"final":"d"`, `"final":"d","rules":[{"domain":"x","server":"other"}]`},

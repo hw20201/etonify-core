@@ -84,7 +84,7 @@ func (s *StartedService) LookupPublicIP(ctx context.Context, request *PublicIPLo
 	go watchPublicIPGeneration(queryCtx, cancel, networkGeneration, instance.urlTestHistoryStorage.Generation)
 	plan, err := scopedhttp.NewPlan(instance.publicIPConfig, chain)
 	if err != nil {
-		return nil, err
+		return nil, status.Errorf(codes.FailedPrecondition, "unsupported scoped query configuration: %v", err)
 	}
 	session, err := scopedhttp.NewSession(queryCtx, instance.ctx, plan)
 	if err != nil {

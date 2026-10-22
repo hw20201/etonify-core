@@ -1,0 +1,86 @@
+{
+  "log": {
+    "level": "warning"
+  },
+  "global": {
+    "urltest_concurrency_limit": 10
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "https",
+        "tag": "dns-remote",
+        "server": "dns.cloudflare.com",
+        "server_port": 443,
+        "path": "/dns-query",
+        "detour": "select",
+        "domain_resolver": "dns-local"
+      },
+      {
+        "type": "udp",
+        "tag": "dns-direct",
+        "server": "1.1.1.1",
+        "server_port": 53
+      },
+      {
+        "type": "local",
+        "tag": "dns-local"
+      }
+    ],
+    "final": "dns-remote",
+    "cache_capacity": 4096
+  },
+  "inbounds": [],
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "select",
+      "outbounds": [
+        "literal-socks"
+      ],
+      "default": "literal-socks",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "socks",
+      "server": "192.0.2.10",
+      "server_port": 1080,
+      "tag": "literal-socks",
+      "tcp_fast_open": true,
+      "tcp_multi_path": false
+    },
+    {
+      "type": "direct",
+      "tag": "direct",
+      "tcp_fast_open": true,
+      "tcp_multi_path": false
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": "dns-local",
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "type": "logical",
+        "mode": "or",
+        "rules": [
+          {
+            "protocol": "dns"
+          },
+          {
+            "port": 53
+          }
+        ],
+        "action": "hijack-dns"
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "direct"
+      }
+    ],
+    "final": "select"
+  }
+}
