@@ -14,6 +14,18 @@ func TestAppDefaultDependencyDiagnostics(t *testing.T) {
 		change     func(map[string]any, map[string]any, map[string]any)
 	}{
 		{"vless", "outbound.protocol.vless", func(_ map[string]any, leaf, _ map[string]any) { leaf["type"] = "vless"; leaf["uuid"] = "private-uuid" }},
+		{"vless Reality hostname precedes TLS bootstrap and DNS", "outbound.protocol.vless", func(root map[string]any, leaf, _ map[string]any) {
+			leaf["type"] = "vless"
+			leaf["server"] = "private-endpoint.example"
+			leaf["uuid"] = "private-uuid"
+			leaf["flow"] = "xtls-rprx-vision"
+			leaf["tls"] = map[string]any{
+				"enabled": true, "server_name": "private-sni.example",
+				"utls":    map[string]any{"enabled": true, "fingerprint": "chrome"},
+				"reality": map[string]any{"enabled": true, "public_key": "private-public-key", "short_id": "private-short-id"},
+			}
+			root["dns"].(map[string]any)["rules"] = []any{map[string]any{"domain": "private-rule.example", "server": "dns-direct"}}
+		}},
 		{"trojan", "outbound.protocol.trojan", func(_ map[string]any, leaf, _ map[string]any) { leaf["type"] = "trojan" }},
 		{"direct", "outbound.protocol.direct", func(_ map[string]any, leaf, _ map[string]any) { leaf["type"] = "direct" }},
 		{"unknown protocol redacted", "outbound.protocol.other", func(_ map[string]any, leaf, _ map[string]any) { leaf["type"] = "private-protocol" }},
