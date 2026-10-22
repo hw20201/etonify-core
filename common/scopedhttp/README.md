@@ -24,8 +24,20 @@ The app-generated default SOCKS fixture is a compatibility fixture, **not** the 
 
 The current configuration snapshot and frozen selection tags contain no numeric endpoint pin. The live VLESS outbound and public DNS interfaces expose no immutable, unexpired endpoint-address snapshot bound to the node identity, full configuration and core/network generations. A live `DialContext`, an unqualified cache lookup, or an arbitrary established connection is not a substitute for that state. Supporting the domain case requires a reviewed source of such endpoint pins (without a new system/direct DNS lookup), generation-safe capture/validation, a query-private VLESS/Reality dependency graph and complete success/failure/cancellation tests. Reality's existing verification-failure camouflage work also needs query-lifetime review before reuse. Until those prerequisites exist, this path remains fail-closed; no resolver or direct-internet fallback is added.
 
+### Runtime cache is not an endpoint-pin API
+
+`dns/public_ip_endpoint_pin_test.go` exercises the real DNS client entirely with synthetic transports and persistent-cache data. It verifies three reasons an ordinary `Lookup` result cannot be promoted to a private-query endpoint pin:
+
+- The cache key isolates resolver tags, question, subnet and optional transport environment, but does not itself bind the complete node/Reality configuration or query core/network generations. Two synthetic transports sharing a tag can retrieve the same cached answer. This characterizes the key, **not** a claim that normal configuration reload omits cache invalidation.
+- With `disable_expire`, even an already expired persistent entry can be returned with `DisableOptimisticCache` enabled. An address list alone supplies neither expiry nor provenance.
+- With optimistic caching, an expired answer can be returned while refresh runs under the **core** context, not the caller's query context. Cancelling only the query does not cancel that refresh. Therefore using `Lookup` as a supposedly cache-only pin read can also start unaudited DNS activity.
+
+These options are synthetic boundary cases, not assertions about the user's enabled cache settings. There is no cache-peek-only operation with validated lifetime and immutable node identity in `adapter.DNSRouter` / `adapter.DNSClient`. No production allowlist or DNS behavior is broadened by these tests.
+
+Separately, `common/tls/reality_client.go` launches `realityClientFallback` after verification failure using the constructor's core context; its HTTP request has no query context. Before a private Reality adapter is enabled, that camouflage path must be explicitly disabled for the query, its socket ownership made query-local, and failure/cancellation tested. Changing the shared VPN Reality behavior is not an acceptable workaround.
+
 ```sh
-go test -race -tags with_utls -count=1 ./common/scopedhttp ./daemon ./experimental/libbox ./cmd/internal/build_libbox
+go test -race -tags with_utls -count=1 ./common/scopedhttp ./daemon ./experimental/libbox ./cmd/internal/build_libbox ./dns
 ```
 
 ## Ownership and lifetime
