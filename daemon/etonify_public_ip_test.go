@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"io"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -121,5 +122,40 @@ func TestPublicIPRPCConfigurationDiagnostic(t *testing.T) {
 	result, err = s.LookupPublicIP(ctx, request)
 	if result != nil || status.Code(err) != codes.FailedPrecondition || status.Convert(err).Message() != "unsupported scoped query configuration: [PIP_CFG:selection.invalid]" {
 		t.Fatalf("unexpected selection rejection: %v %v", result, err)
+	}
+}
+
+// Use the same full application-shaped fixture as the real with_utls VLESS
+// constructor tests. A minimal invalid UUID or missing TLS is not evidence for
+// the user's domain + Reality dependency graph. This is a fail-closed regression,
+// not proof that public-IP lookup works for this node.
+func TestPublicIPRPCDomainRealityWithoutEndpointPin(t *testing.T) {
+	snapshot, err := os.ReadFile("../common/scopedhttp/testdata/app-default-vless-reality-domain.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	leaf := publicIPTestLeaf{tag: "domain-reality"}
+	group := &publicIPTestGroup{publicIPTestLeaf: publicIPTestLeaf{tag: "select"}, selected: leaf}
+	s := &StartedService{
+		serviceStatus: &ServiceStatus{Status: ServiceStatus_STARTED},
+		instance: &Instance{
+			ctx: ctx,
+			outboundManager: publicIPTestManager{items: map[string]adapter.Outbound{
+				"select": group, "domain-reality": leaf,
+			}},
+			urlTestHistoryStorage: urltest.NewHistoryStorage(),
+			publicIPConfig:        snapshot,
+		},
+	}
+	for _, provider := range []string{"ipQuery", "ipApi", "ipWho"} {
+		result, err := s.LookupPublicIP(ctx, &PublicIPLookupRequest{
+			RequestID: "domain-reality-regression", OutboundTag: "select",
+			Provider: provider, TimeoutMillis: 1000,
+		})
+		if result != nil || status.Code(err) != codes.FailedPrecondition || status.Convert(err).Message() != "unsupported scoped query configuration: [PIP_CFG:outbound.protocol.vless]" {
+			t.Fatalf("%s: unproven dependency graph accepted: result=%v err=%v", provider, result, err)
+		}
 	}
 }

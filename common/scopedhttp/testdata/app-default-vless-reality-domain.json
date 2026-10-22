@@ -1,0 +1,64 @@
+{
+  "dns": {
+    "servers": [
+      {
+        "type": "https",
+        "tag": "dns-remote",
+        "server": "dns.cloudflare.com",
+        "server_port": 443,
+        "path": "/dns-query",
+        "detour": "select",
+        "domain_resolver": "dns-local"
+      },
+      {
+        "type": "udp",
+        "tag": "dns-direct",
+        "server": "1.1.1.1",
+        "server_port": 53
+      },
+      { "type": "local", "tag": "dns-local" }
+    ],
+    "final": "dns-remote",
+    "cache_capacity": 4096
+  },
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "select",
+      "outbounds": ["domain-reality"],
+      "default": "domain-reality",
+      "interrupt_exist_connections": true
+    },
+    {
+      "type": "vless",
+      "tag": "domain-reality",
+      "server": "node.example.invalid",
+      "server_port": 443,
+      "uuid": "00000000-0000-4000-8000-000000000001",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "camouflage.example.invalid",
+        "utls": { "enabled": true, "fingerprint": "chrome" },
+        "reality": {
+          "enabled": true,
+          "public_key": "CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "short_id": "0123456789abcdef"
+        }
+      },
+      "tcp_fast_open": true,
+      "tcp_multi_path": false
+    },
+    {
+      "type": "direct",
+      "tag": "direct",
+      "tcp_fast_open": true,
+      "tcp_multi_path": false
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": "dns-local",
+    "final": "select"
+  }
+}
